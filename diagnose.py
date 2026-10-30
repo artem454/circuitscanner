@@ -53,16 +53,6 @@ SYMPTOMS = {
     "out_high": "Выходное напряжение завышено или плавает",
 }
 
-# Справочник: допустимое напряжение (В) популярных деталей
-PART_VMAX = {
-    "IRFP350": 400, "IRFP460": 500, "IRF840": 500, "IRF540": 100, "IRFZ44": 55, "IRF3205": 55,
-    "FS25R12W1T4": 1200, "BTA140-600": 600, "BTA16-600": 600, "BT136": 600,
-    "1N4007": 1000, "1N4148": 100, "UF4007": 1000, "KBU1010": 1000, "SKD35/16": 1600,
-    "КЦ407А": 400, "IR2111": 600, "IR2110": 500, "IR2112": 600, "L7812": 35, "L7805": 35,
-    "2N7002": 60, "2N4401": 40, "2N4403": 40, "2SC4672": 50, "TL074": 36, "TL072": 36,
-    "LM358": 32, "XR2206CP": 26, "CD4075BE": 18, "К561ИЕ8": 15, "TLP701": 30, "DB3": 32,
-}
-
 # Виды отказа по типу детали: (вид, базовый вес, симптомы, как проверить)
 MODES = {
     "M": [("пробой сток-исток", 1.0, {"fuse", "smoke", "no_power", "protection", "overheat"},
@@ -174,7 +164,8 @@ ROLE_BOOST = {
     "mcu": {"*": 1.3, "mcu_hang": 1.8, "comm": 1.5},
     "pullup": {"*": 1.1, "comm": 2.0, "mcu_hang": 1.3},
     "decoupling": {"*": 1.0, "mcu_hang": 1.6, "noisy": 1.4, "unstable": 1.4},
-    "speed_feedback": {"*": 1.5, "overspeed": 2.5, "speed_hunt": 2.0, "position_error": 2.0},
+    "speed_feedback": {"*": 1.5, "overspeed": 2.5, "speed_hunt": 2.0},
+    "position_feedback": {"*": 1.5, "position_error": 2.5, "speed_hunt": 1.5, "overspeed": 1.3},
     "feedback": {"*": 1.5, "out_high": 2.5, "unstable": 1.5, "overspeed": 1.5},
 }
 
@@ -187,7 +178,8 @@ ROLE_RU = {
     "burden": "нагрузочный резистор токовой петли", "loop_protection": "защита входа 4–20 мА",
     "adc_input": "входная цепь АЦП", "sensor": "датчик КИП", "clock": "тактирование МК",
     "mcu": "микроконтроллер", "pullup": "подтяжка шины/сброса", "decoupling": "развязка питания МК",
-    "speed_feedback": "обратная связь по скорости/положению", "feedback": "обратная связь по напряжению",
+    "speed_feedback": "обратная связь по скорости", "position_feedback": "обратная связь по положению",
+    "feedback": "обратная связь по напряжению",
 }
 
 
@@ -227,10 +219,11 @@ def part_vmax(comp):
     val, vmax = parse_value(comp.get("value"))
     if vmax:
         return vmax
+    import parts
+    _, d = parts.lookup(comp.get("value", ""))
+    if d and d.get("vmax"):
+        return d["vmax"]
     v = str(comp.get("value", "")).upper().replace(" ", "")
-    for name, vm in PART_VMAX.items():
-        if name.upper() in v:
-            return vm
     m = re.search(r"-(\d{3,4})\b", v)                    # BTA140-600, FS…-1200
     return float(m.group(1)) if m else None
 
@@ -374,13 +367,14 @@ class Circuit:
         adc = self.mcu_pins("adc")
         if t in ("SENSOR", "RT", "TC"):
             roles.append("sensor")
-        fbk = {n for r, c in self.comps.items() if c.get("type") in ("ENC", "TACHO", "HALL")
-               for n in self.pins(r).values() if n.upper() not in core.GROUND_NAMES}
-        if t in ("ENC", "TACHO", "HALL"):
-            roles.append("speed_feedback")
-        elif t in ("R", "C", "Z", "D") and nets & fbk and not any(
-                re.search(r"^\+?\d|VCC|VDD|\+U", n.upper()) for n in nets & fbk):
-            roles.append("speed_feedback")
+        for types, role in ((("TACHO",), "speed_feedback"), (("ENC", "HALL"), "position_feedback")):
+            fbk = {n for r, c in self.comps.items() if c.get("type") in types
+                   for n in self.pins(r).values() if n.upper() not in core.GROUND_NAMES}
+            if t in types:
+                roles.append(role)
+            elif t in ("R", "C", "Z", "D") and nets & fbk and not any(
+                    re.search(r"^\+?\d|VCC|VDD|\+U", n.upper()) for n in nets & fbk):
+                roles.append(role)
         if t == "R" and any(re.search(r"TL431|LM317|LM2596|MC34063|UC384|LM2576|XL4015|MP1584",
                                       str(self.comps[r].get("value", "")).upper()) and
                             any(str(k).upper() in ("REF", "ADJ", "FB") and n in nets for k, n in self.pins(r).items())
@@ -560,6 +554,12 @@ def diagnose(project, symptoms=()):
     for r in risks:
         for ref in r["refs"]:
             risk_refs.setdefault(ref, []).append(r)
+    import faults                                       # моделирование поломок этой схемы
+    try:
+        sim_idx = faults.symptom_index(faults.simulate(project))
+        sim_types = set(faults.FAULTS)
+    except Exception:
+        sim_idx, sim_types = {}, set()
 
     cands = []
     for ref, c in circ.comps.items():
@@ -598,8 +598,23 @@ def diagnose(project, symptoms=()):
             elif span and span >= 100:
                 w *= 1.2
                 why.append(f"под высоким напряжением (~{span:.0f} В)")
+            got = set()
+            if symptoms and t in sim_types:         # что показало моделирование поломок этой схемы
+                got = sim_idx.get(ref, set()) & set(symptoms)
+                if got:
+                    w *= 2.0
+                    why.append("моделирование: поломка этой детали даёт " +
+                               ", ".join(SYMPTOMS[s].lower() for s in sorted(got)))
+                elif any(s in {x for v in sim_idx.values() for x in v} for s in symptoms):
+                    w *= 0.6                        # симптом в схеме моделируется, но не от этой детали
+            sf, n_sf = faults.stats_factor(t, roles, symptoms)
+            if n_sf and abs(sf - 1) > 0.05:         # статистика моделирования по всем схемам
+                w *= sf
+                why.append(f"по моделированию всех схем ×{sf:.2f}")
             k = phys["stress"].get(ref)
-            if k and k > 0.6:                       # нагрузка по расчёту: 1 = на пределе паспорта
+            related = not symptoms or got or any(s in ROLE_BOOST.get(role, {}) for role in roles for s in symptoms) \
+                or bool(set(symptoms) & set(phys.get("stress_sym", {}).get(ref, [])))
+            if k and k > 0.6 and related:           # нагрузка по расчёту: 1 = на пределе паспорта
                 w *= 1 + 1.5 * min(k, 3) ** 2
                 why.append(f"по расчёту нагружена на {k * 100:.0f} % допустимого")
             for r in risk_refs.get(ref, []):

@@ -46,6 +46,7 @@ class App(tk.Tk):
         self.view_bg = "source"    # source | clean | analysis
         self.analysis = None       # результат analyzer.analyze
         self.diag = None
+        self.fault_rank = []
         self.train_proc = None
         self.zoom = 1.0
         self.off = [0.0, 0.0]
@@ -169,6 +170,18 @@ class App(tk.Tk):
         ttk.Button(row, text="Деталь неисправна", command=lambda: self.record_repair("faulty")).pack(side="left", padx=4)
         ttk.Button(row, text="Деталь исправна", command=lambda: self.record_repair("ok")).pack(side="left")
         ttk.Button(row, text="Условия (physics.json)", command=self.open_physics).pack(side="left", padx=4)
+        mrow = ttk.Frame(frame)
+        mrow.pack(fill="x", pady=2)
+        ttk.Label(mrow, text="Измерения:").pack(side="left")
+        self.var_meas = tk.StringVar()
+        ttk.Entry(mrow, textvariable=self.var_meas).pack(side="left", fill="x", expand=True, padx=4)
+        ttk.Button(mrow, text="Поломка по измерениям", command=self.run_faults).pack(side="left")
+        ttk.Label(frame, text="формат: цепь=вольты; …  например  ADC0N=0; AI1=0,02; +24V=23,8",
+                  foreground="#777").pack(anchor="w")
+        prow = ttk.Frame(frame)
+        prow.pack(fill="x", pady=2)
+        ttk.Button(prow, text="Найти деталь в справочнике…", command=self.find_part).pack(side="left")
+        ttk.Button(prow, text="Импорт даташита (PDF)…", command=self.import_datasheet).pack(side="left", padx=4)
         inner = ttk.Frame(frame)
         inner.pack(fill="both", expand=True)
         tv = ttk.Treeview(inner, columns=("p", "ref", "what"), show="headings", selectmode="browse")
@@ -205,10 +218,80 @@ class App(tk.Tk):
                         f"слабых мест {len(self.diag['risks'])}, учтено ремонтов {self.diag['repairs_used']}. "
                         f"Отчёт с формулами — diagnosis.md")
 
+    def run_faults(self):
+        """Поиск поломки по измеренным напряжениям (моделирование неисправностей)."""
+        if not self.project or not self.netlist:
+            return messagebox.showinfo("Измерения", "Нужен netlist.json: сначала распознайте схему.")
+        meas = {}
+        for part in re.split(r"[;\n]+", self.var_meas.get()):
+            k, _, v = part.partition("=")
+            try:
+                meas[k.strip()] = float(v.strip().replace(",", "."))
+            except ValueError:
+                pass
+        if not meas:
+            return messagebox.showinfo("Измерения", "Введите, например: ADC0N=0; AI1=0,02")
+        import faults
+        import physics
+        fl = faults.simulate(self.project)
+        unknown = [n for n in meas if not any(n in f["U"] for f in fl)]
+        ranked = faults.by_measurements(fl, meas)
+        base = physics.Physics(self.netlist, core.load_json(self.project / "physics.json") or {})
+        base.solve_dc()
+        tests = faults.next_test_points(ranked, meas, base.fixed)
+        self.fault_rank = ranked
+        tv = self.tv_diag
+        tv.delete(*tv.get_children())
+        for i, r in enumerate(ranked[:15]):
+            tv.insert("", "end", iid=f"f{i}", values=(f"{r['p'] * 100:.1f}", r["ref"] or "—",
+                                                     r["desc"] if r["ref"] else "схема исправна"))
+        self._set_detail([(faults.report(ranked, tests, meas) + "\n", None)] +
+                         ([(f"\nНет таких цепей в схеме: {', '.join(unknown)}\n", "h")] if unknown else []))
+        self.status.set(f"Смоделировано поломок: {len(fl) - 1}. Главный кандидат: "
+                        f"{ranked[0]['ref'] or 'исправна'} {ranked[0]['desc']} ({ranked[0]['p'] * 100:.0f} %)")
+
+    def find_part(self):
+        import parts
+        q = simpledialog.askstring("Справочник", "Деталь (как в номинале на схеме), например IRFP460:", parent=self)
+        if not q:
+            return
+        name, d = parts.lookup(q)
+        if not d:
+            return self._set_detail([(f"{q}: нет в справочнике. Добавьте её импортом даташита.\n", "h")])
+        rows = [(f"{name}{' (ваша)' if d.get('_user') else ''}\n", "h")]
+        rows += [(f"  {k:10} {v}\n", None) for k, v in d.items() if k not in ("pins", "_user")]
+        self._set_detail(rows)
+
+    def import_datasheet(self):
+        import parts
+        path = filedialog.askopenfilename(title="Даташит", filetypes=[("PDF", "*.pdf")])
+        if not path:
+            return
+        try:
+            name, p, where = parts.import_pdf(path)
+        except SystemExit as e:
+            return messagebox.showerror("Импорт", str(e))
+        except Exception as e:
+            return messagebox.showerror("Импорт", f"Не удалось прочитать PDF: {e}")
+        rows = [(f"{name} — добавлено в learned/parts_user.json\n", "h")]
+        rows += [(f"  {k:8} = {p[k]:g}   ← {where[k]}\n", None) for k in where]
+        rows.append(("\nПроверьте значения по даташиту: таблицы PDF распознаются не идеально.\n", None))
+        self._set_detail(rows)
+
     def on_diag(self, _=None):
         sel = self.tv_diag.selection()
-        if not sel or not self.diag:
+        if not sel or not self.diag and not sel[0].startswith("f"):
             return
+        if sel[0].startswith("f"):
+            r = self.fault_rank[int(sel[0][1:])]
+            refs = [r["ref"]] if r["ref"] else []
+            self.hl_refs, self.hl_cells = set(refs), self._cells_of(refs)
+            parts_ = [(f"{r['ref'] or 'исправна'} — {r['desc']} ({r['p'] * 100:.1f} %)\n", "h")]
+            parts_ += [(f"  {n}: модель {us:.2f} В, измерено {um:.2f} В\n", None) for n, us, um in r["detail"]]
+            if r.get("symptoms"):
+                parts_.append(("Ожидаемые симптомы: " + ", ".join(diagnose.SYMPTOMS.get(s, s) for s in r["symptoms"]) + "\n", None))
+            self._set_detail(parts_)
+            return self._focus_cells()
         kind, i = sel[0][0], int(sel[0][1:])
         if kind == "r":
             r = self.diag["risks"][i]

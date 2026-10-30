@@ -33,46 +33,9 @@ import numpy as np
 
 import core
 import diagnose as dg
+import parts
 
-# Справочные параметры (типовые из даташитов; при сомнении сверяйте с даташитом)
-PARTS = {
-    "IRFP350": dict(kind="MOSFET", vmax=400, imax=16, rds=0.30, qg=150e-9, rth_jc=0.65, rth_ja=40, ciss=2.6e-9),
-    "IRFP460": dict(kind="MOSFET", vmax=500, imax=20, rds=0.27, qg=210e-9, rth_jc=0.45, rth_ja=40, ciss=4.2e-9),
-    "IRF840": dict(kind="MOSFET", vmax=500, imax=8, rds=0.85, qg=63e-9, rth_jc=1.0, rth_ja=62, ciss=1.3e-9),
-    "IRF540": dict(kind="MOSFET", vmax=100, imax=28, rds=0.077, qg=72e-9, rth_jc=1.0, rth_ja=62),
-    "IRFZ44": dict(kind="MOSFET", vmax=55, imax=49, rds=0.0175, qg=63e-9, rth_jc=1.0, rth_ja=62),
-    "2N7002": dict(kind="MOSFET", vmax=60, imax=0.115, rds=7.5, qg=1e-9, rth_ja=350),
-    "FS25R12W1T4": dict(kind="IGBT", vmax=1200, imax=25, vce=1.85, qg=0.19e-6, rth_jc=1.2, ciss=1.4e-9),
-    "1N4007": dict(kind="D", vmax=1000, imax=1.0, trr=30e-6),
-    "1N4148": dict(kind="D", vmax=100, imax=0.2, trr=4e-9),
-    "UF4007": dict(kind="D", vmax=1000, imax=1.0, trr=75e-9),
-    "KBU1010": dict(kind="BR", vmax=1000, imax=10),
-    "SKD35/16": dict(kind="BR", vmax=1600, imax=35),
-    "КЦ407А": dict(kind="BR", vmax=400, imax=0.5),
-    "L7812": dict(kind="REG", vout=12, vin_max=35, dropout=2.0, imax=1.5, rth_ja=50, rth_jc=5),
-    "L7805": dict(kind="REG", vout=5, vin_max=35, dropout=2.0, imax=1.5, rth_ja=50, rth_jc=5),
-    "IR2111": dict(kind="DRV", vb_max=600, io_src=0.2, io_snk=0.42, dead=650e-9, tpd=850e-9),
-    "IR2110": dict(kind="DRV", vb_max=500, io_src=2.0, io_snk=2.0, tpd=120e-9),
-    "TL074": dict(kind="OPAMP", vs_max=36, gbw=3e6, sr=13e6,
-                  pins={"A": (1, 2, 3), "B": (7, 6, 5), "C": (8, 9, 10), "D": (14, 13, 12)}),
-    "TL072": dict(kind="OPAMP", vs_max=36, gbw=3e6, sr=13e6, pins={"A": (1, 2, 3), "B": (7, 6, 5)}),
-    "LM358": dict(kind="OPAMP", vs_max=32, gbw=1e6, sr=0.3e6, pins={"A": (1, 2, 3), "B": (7, 6, 5)}),
-    "BTA140-600": dict(kind="TRIAC", vmax=600, imax=25),
-    "TLP701": dict(kind="OPTO", tpd=700e-9),
-    "6N137": dict(kind="OPTO", tpd=75e-9),
-    "PC817": dict(kind="OPTO", tpd=18e-6),
-    "XR2206": dict(kind="GEN", fmax=1e6),
-    "К561": dict(kind="LOGIC", fmax=2e6),
-    "CD40": dict(kind="LOGIC", fmax=3e6),
-    "74HC": dict(kind="LOGIC", fmax=50e6),
-    # микроконтроллеры: питание, рекомендованный ток вывода, АЦП (разрядность, макс. сопротивление источника)
-    "STM32": dict(kind="MCU", vcc=3.3, i_pin=8e-3, i_abs=25e-3, adc_bits=12, adc_rmax=10e3, c_adc=8e-12, five_v_tol=False),
-    "ATMEGA": dict(kind="MCU", vcc=5.0, i_pin=20e-3, i_abs=40e-3, adc_bits=10, adc_rmax=10e3, c_adc=14e-12),
-    "ESP32": dict(kind="MCU", vcc=3.3, i_pin=20e-3, i_abs=40e-3, adc_bits=12, adc_rmax=10e3, c_adc=10e-12, adc_lin=2.45),
-    "PIC16": dict(kind="MCU", vcc=5.0, i_pin=20e-3, i_abs=25e-3, adc_bits=10, adc_rmax=10e3, c_adc=7.5e-12),
-    "MSP430": dict(kind="MCU", vcc=3.3, i_pin=6e-3, i_abs=6e-3, adc_bits=12, adc_rmax=10e3, c_adc=25e-12),
-    "AT89": dict(kind="MCU", vcc=5.0, i_pin=10e-3, i_abs=15e-3),
-}
+# Параметры деталей — из справочника parts.py (parts_db.json + ваши/импортированные из даташитов)
 
 # Термопары: коэффициент Зеебека около 0…500 °C, мкВ/°C
 SEEBECK = {"K": 41, "J": 52, "T": 43, "E": 61, "N": 27, "S": 6, "R": 6, "B": 1, "L": 66, "ХА": 41, "ХК": 66}
@@ -104,20 +67,12 @@ DEFAULT_SETTINGS = {
     "loop_bw_Hz": None,         # полоса контура регулирования скорости
 }
 
-# Опорные напряжения микросхем с обратной связью: (Uоп, вывод ОС, вид формулы)
-FB_PARTS = {"TL431": (2.495, "REF", "top"), "LM317": (1.25, "ADJ", "lm317"), "LM2596": (1.23, "FB", "top"),
-            "MC34063": (1.25, "FB", "top"), "UC384": (2.5, "FB", "top"), "LM2576": (1.23, "FB", "top"),
-            "XL4015": (1.25, "FB", "top"), "MP1584": (0.8, "FB", "top"), "AMS1117-ADJ": (1.25, "ADJ", "lm317")}
-
 VF = 0.7
 
 
 def part(comp):
-    v = str(comp.get("value", "")).upper().replace(" ", "")
-    for name, d in PARTS.items():
-        if name.upper() in v:
-            return name, d
-    return None, None
+    """(имя, параметры) детали по номиналу из справочника."""
+    return parts.lookup(comp.get("value", ""))
 
 
 def fmt(x, unit=""):
@@ -145,6 +100,7 @@ class Physics:
         self.S = dict(DEFAULT_SETTINGS, **(settings or {}))
         self.findings = []
         self.stress = {}           # ref → коэффициент нагрузки (1 = на пределе)
+        self.stress_sym = {}       # ref → симптомы, к которым ведёт эта перегрузка
         self.U = {}
         self.fixed = {}
 
@@ -152,8 +108,9 @@ class Physics:
         self.findings.append({"level": level, "refs": list(refs), "title": title,
                               "formula": formula, "conclusion": conclusion})
 
-    def mark(self, ref, k):
+    def mark(self, ref, k, syms=("overheat", "smoke", "after_time", "fuse")):
         self.stress[ref] = max(self.stress.get(ref, 0), k)
+        self.stress_sym.setdefault(ref, set()).update(syms)
 
     # ---------- метод узловых потенциалов ----------
 
@@ -167,6 +124,17 @@ class Physics:
             if n not in fixed and not n.endswith("_IN"):         # сетевые входы — переменка
                 lbl = str(c.meta.get(n, {}).get("label", "")) + n
                 fixed[n] = -abs(val) if re.search(r"[-−]\s*\d", lbl) else val
+        # тахогенератор — источник напряжения U = Kт·n (на половине максимальных оборотов)
+        for ref, comp in c.comps.items():
+            if comp.get("type") != "TACHO":
+                continue
+            m = re.search(r"(\d+(?:[.,]\d+)?)\s*[VВ]\s*/\s*(\d+)", str(comp.get("value", "")))
+            p = list(c.pins(ref).values())
+            gnd = [n for n in p if n.upper() in core.GROUND_NAMES]
+            if m and gnd and len(p) == 2:
+                ke = float(m.group(1).replace(",", ".")) / float(m.group(2))
+                top = [n for n in p if n not in gnd][0]
+                fixed.setdefault(top, ke * self.S["motor_rpm_max"] * 0.5)
         free = [n for n in c.nets if n not in fixed]
         idx = {n: i for i, n in enumerate(free)}
         N = len(free)
@@ -186,7 +154,7 @@ class Physics:
                     val = r0 * (1 + PT_A * 25 + PT_B * 625)
                 t = "R"
             if t == "SENSOR" and "+" in p and "-" in p and re.search(r"4.?20", vs_):
-                isrc.append((ref, p["+"], p["-"], 0.020))      # худший случай — верх шкалы 20 мА
+                isrc.append((ref, p["+"], p["-"], comp.get("_current", 0.020)))   # худший случай — 20 мА
                 continue
             if t == "R" and val and len(p) == 2:
                 a, b = list(p.values())
@@ -197,8 +165,14 @@ class Physics:
             elif t in ("D", "Z") and "A" in p and "K" in p:
                 vz = None
                 if t == "Z":
-                    m = re.search(r"(\d+(?:[.,]\d+)?)\s*[VВ]", str(comp.get("value", "")))
-                    vz = float(m.group(1).replace(",", ".")) if m else None
+                    _, pd_ = parts.lookup(comp.get("value", ""))
+                    if pd_ and pd_.get("vbr"):
+                        vz = pd_["vbr"]                       # TVS: начинает проводить на пробое, не на Uраб
+                    elif pd_ and pd_.get("vz"):
+                        vz = pd_["vz"]
+                    else:
+                        m = re.search(r"(\d+(?:[.,]\d+)?)\s*[VВ]", str(comp.get("value", "")))
+                        vz = float(m.group(1).replace(",", ".")) if m else None
                 diodes.append([ref, p["A"], p["K"], vz, 0])     # 0 выкл, 1 прямо, -1 пробой
             elif t == "BR":
                 ac = [n for k, n in p.items() if k.upper().startswith("AC")]
@@ -457,10 +431,11 @@ class Physics:
                 p = (vdc - d["vout"]) * I
                 tj = self.S["ambient_C"] + p * d["rth_ja"]
                 starved = vin_min < d["vout"] + d["dropout"]
-                self.mark(reg, max(tj / 125, 1.5 if starved else 0))
+                supply_syms = ("unstable", "mcu_hang", "no_power", "noise", "weak", "overheat")
+                self.mark(reg, max(tj / 125, 1.5 if starved else 0), supply_syms)
                 if starved:
                     for r in caps:                      # мала ёмкость фильтра — её и подозревать
-                        self.mark(r, min(3.0, (rip or 0) / (0.2 * vdc)))
+                        self.mark(r, min(3.0, (rip or 0) / (0.2 * vdc)), supply_syms)
                 lvl = "высокий" if tj > 125 or starved else (
                     "средний" if tj > 100 or vdc * 1.1 > d["vin_max"] * 0.9 else "информация")
                 self.add(lvl, [reg] + caps, f"{reg} {name}: режим стабилизатора",
@@ -842,9 +817,9 @@ class Physics:
         for ref, comp in self.c.comps.items():
             if comp.get("type") == "MCU":
                 v = str(comp.get("value", "")).upper()
-                for name, d in PARTS.items():
-                    if d["kind"] == "MCU" and name in v:
-                        return ref, name, d
+                name, d = parts.lookup(comp.get("value", ""))
+                if d and d.get("kind") == "MCU":
+                    return ref, name, d
                 return ref, comp.get("value", "МК"), dict(vcc=3.3, i_pin=8e-3, i_abs=20e-3, adc_bits=12,
                                                          adc_rmax=10e3, c_adc=10e-12)
         return None, None, None
@@ -1229,10 +1204,11 @@ class Physics:
         # микросхемы с обратной связью по напряжению
         for ref, comp in c.comps.items():
             v = str(comp.get("value", "")).upper()
-            hit = next(((k, d) for k, d in FB_PARTS.items() if k in v), None)
-            if not hit:
+            name, dd = parts.lookup(comp.get("value", ""))
+            if not dd or "fb_pin" not in dd or "vref" not in dd:
                 continue
-            name, (vr, pin, kind) = hit
+            vr, pin = dd["vref"], dd["fb_pin"]
+            kind = "lm317" if dd["kind"] == "REG_ADJ" else "top"
             p = c.pins(ref)
             fb = next((n for k, n in p.items() if str(k).upper() == pin), None)
             if not fb:
@@ -1261,6 +1237,51 @@ class Physics:
                 lvl = "средний"
                 concl = f"расчёт {vout:.2f} В расходится с меткой «{lbl}» более чем на 5 % — проверьте номиналы; " + concl
             self.add(lvl, [ref] + top[:1] + bot[:1], f"{ref} {name}: обратная связь по напряжению", form, concl)
+
+    def tvs_checks(self):
+        """TVS-диод: рабочее напряжение против нормального уровня сигнала и напряжение
+        ограничения против того, что выдерживает защищаемый вход."""
+        c = self.c
+        mref, mname, md = self._mcu()
+        mcu_nets = {n for n in c.pins(mref).values() if n.upper() not in core.GROUND_NAMES
+                    and n not in c.mcu_pins("vcc")} if mref else set()
+        for ref, comp in c.comps.items():
+            name, d = parts.lookup(comp.get("value", ""))
+            if not d or d.get("kind") != "TVS" or not d.get("vwm"):
+                continue
+            nets = [n for n in c.pins(ref).values() if n.upper() not in core.GROUND_NAMES]
+            if not nets:
+                continue
+            n = nets[0]
+            form = (f"{comp.get('value')}: Uраб = {d['vwm']:g} В, пробой ≈ {d['vbr']:g} В, ограничение при импульсе "
+                    f"≈ {d['vc']:g} В, Pимп = {d['ppk']} Вт (10/1000 мкс)")
+            concl, lvl = [], "информация"
+            umax = None
+            if "burden" in " ".join(r for x in c.neighbors(n) for r in c.roles.get(x, [])):
+                rb = [self._val(x) for x in c.neighbors(n) if "burden" in c.roles.get(x, [])]
+                umax = 0.021 * rb[0] if rb and rb[0] else None
+            if umax and umax > d["vwm"]:
+                lvl = "средний"
+                concl.append(f"нормальный сигнал до {umax:.2f} В (21 мА·Rн) выше Uраб — у верхней границы TVS даёт утечку и искажает показания")
+            # путь до вывода МК: напрямую или через один резистор
+            direct = n in mcu_nets
+            via = [r for r in c.neighbors(n) if c.comps[r].get("type") == "R" and set(c.pins(r).values()) & mcu_nets]
+            if md and (direct or via):
+                lim = md["vcc"] + 0.3
+                if d["vc"] > lim:
+                    if direct:
+                        lvl = "высокий"
+                        concl.append(f"ограничивает на {d['vc']:g} В, а вход {mname} выдерживает {lim:.1f} В — TVS вход не защитит")
+                    else:
+                        R = self._val(via[0])
+                        i = (d["vc"] - lim) / R if R else 0
+                        form += f"; ток в защитный диод МК через {via[0]}: I = (Uогр − (VCC+0,3))/R = ({d['vc']:g} − {lim:.1f})/{fmt(R, 'Ом')} = {fmt(i, 'А')}"
+                        if i > 5e-3:
+                            lvl = "средний" if lvl == "информация" else lvl
+                            concl.append("ток в защитный диод МК больше ~5 мА — нужен резистор больше или диоды Шоттки на питание")
+                        else:
+                            concl.append("последовательный резистор ограничивает ток во внутренние диоды МК — допустимо")
+            self.add(lvl, [ref], f"{ref}: TVS-защита", form, "; ".join(concl) or "в норме")
 
     def mcu_pin_levels(self):
         """Любой вывод МК (кроме питания) под напряжением выше VCC + 0,3 В — выгорит."""
@@ -1306,11 +1327,13 @@ class Physics:
         self.temp_sensors()
         self.mcu_checks()
         self.feedback()
+        self.tvs_checks()
         self.mcu_pin_levels()
         self.cap_life()
         order = {"высокий": 0, "средний": 1, "низкий": 2, "информация": 3}
         self.findings.sort(key=lambda f: order[f["level"]])
         return {"findings": self.findings, "stress": self.stress, "settings": self.S,
+                "stress_sym": {k: sorted(v) for k, v in self.stress_sym.items()},
                 "node_voltages": {n: round(v, 3) for n, v in sorted(self.U.items()) if n not in self.fixed}}
 
 

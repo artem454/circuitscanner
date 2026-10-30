@@ -6,3 +6,5 @@ learned/history.jsonl
 learned/params_overfit.json
 learned/projects.json
 learned/repairs.jsonl
+learned/sim_stats.json
+learned/parts_user.json
