@@ -5,6 +5,8 @@
     python learn.py symbols [N]         — обучить классификатор символов на синтетике
     python learn.py add папка_проекта   — добавить проверенный проект (netlist.json) в обучение
     python learn.py auto [N] [шагов]    — дообучить всё: проекты, символы, параметры
+    python learn.py curriculum [N] [шагов] — по ступеням: от чистых простых схем до фото сложных
+    python learn.py guard проект …      — реальные схемы без ответа: страховка от переобучения
 
 Оценка: для каждой пары выводов сравнивается «в одной цепи / в разных» по ответу
 и по анализатору (F1), плюс доля найденных деталей. Подбор — случайный поиск
@@ -32,7 +34,7 @@ SEED0 = 5000                     # фиксированный набор схе�
 
 # пределы для подбора: (мин, макс, целое?)
 SPACE = {
-    "text_max": (7, 18, False), "min_len": (2.5, 11, False), "tol": (1.2, 3.5, False),
+    "text_max": (9, 18, False), "min_len": (2.5, 11, False), "tol": (1.2, 3.5, False),
     "dot_d": (1.4, 2.6, False), "dot_min": (1.8, 3.2, False), "dot_max": (5, 12, False),
     "rect_fill": (0.01, 0.1, False), "rect_cont": (1, 4, True), "plate_thick": (1.4, 2.6, False),
     "stroke_len": (1.5, 4.0, False), "sym_area": (2, 8, False), "sym_grow": (2, 5, False),
@@ -40,10 +42,27 @@ SPACE = {
 }
 
 
-def prep(img):
-    """Та же очистка, что у настоящих фото (core.clean), но без выпрямления:
-    поворот синтетики в ответе уже учтён."""
-    return core.clean(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR))
+def prep(img, truth=None):
+    """Тот же путь, что у настоящей картинки: выравнивание листа на фото (core.rectify) и
+    очистка (core.clean). Если лист выровнен, ответ пересчитывается теми же преобразованиями."""
+    bgr = img if img.ndim == 3 else cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    rect, Hw = core.rectify(bgr) if img.ndim == 3 else (bgr, None)
+    if truth is not None and Hw is not None:
+        tp = lambda x, y: cv2.perspectiveTransform(np.array([[[x, y]]], np.float32), Hw)[0][0]
+        truth = dict(truth)
+        pins = []
+        for q in truth["pins"]:
+            a, b = tp(q["x"], q["y"]), tp(q["ox"], q["oy"])
+            pins.append(dict(q, x=float(a[0]), y=float(a[1]), ox=float(b[0]), oy=float(b[1])))
+        comps = []
+        for c in truth["comps"]:
+            b = c["box"]
+            pts = np.array([tp(x, y) for x, y in ((b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3]))])
+            comps.append(dict(c, box=[float(pts[:, 0].min()), float(pts[:, 1].min()),
+                                      float(pts[:, 0].max()), float(pts[:, 1].max())]))
+        truth["pins"], truth["comps"] = pins, comps
+    gray = core.clean(rect)
+    return (gray, truth) if truth is not None else gray
 
 
 # ---------- оценка ----------
@@ -105,17 +124,32 @@ def score(res, truth):
             "score": 0.6 * f1 + 0.2 * comp_rec + 0.2 * pin_rec}
 
 
+LEVELS_ALL = (1, 2, 3, 4, 5)
+
+
 def _eval_one(args):
-    seed, params = args
-    img, truth = synth.generate(seed)
-    res = analyzer.analyze_gray(prep(img), params)
-    return score(res, truth)
+    seed, params, level = (args + (None,))[:3]
+    img, truth = synth.generate(seed, level=level)
+    gray, truth = prep(img, truth)
+    m = score(analyzer.analyze_gray(gray, params), truth)
+    m["level"] = truth.get("level", 0)
+    return m
 
 
-def evaluate(params, n=24, pool=None):
-    jobs = [(SEED0 + i, params) for i in range(n)]
+def evaluate(params, n=24, pool=None, levels=LEVELS_ALL):
+    """Средние метрики на n схемах; уровни сложности по кругу. В m["by_level"] — score по уровням."""
+    jobs = [(SEED0 + i, params, levels[i % len(levels)]) for i in range(n)]
     rows = list(pool.map(_eval_one, jobs)) if pool else [_eval_one(j) for j in jobs]
-    m = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
+    keys = [k for k in rows[0] if k != "level"]
+    m = {k: float(np.mean([r[k] for r in rows])) for k in keys}
+    m["by_level"] = {lv: round(float(np.mean([r["score"] for r in rows if r["level"] == lv])), 3)
+                     for lv in sorted({r["level"] for r in rows})}
+    guards = core.load_json(LEARNED / "guard.json") or []
+    if guards:                                   # страховка на реальных схемах без ответа
+        gf = list(pool.map(_guard_one, [(g, params) for g in guards])) if pool else \
+            [_guard_one((g, params)) for g in guards]
+        m["guard"] = float(np.mean(gf))
+        m["score"] *= m["guard"]
     real = [p for p in registered() if (Path(p) / "netlist.json").exists()]
     if real:
         rr = list(pool.map(_real_one, [(p, params) for p in real])) if pool else             [_real_one((p, params)) for p in real]
@@ -171,6 +205,32 @@ def score_real(res, nl, cell_size):
 
 
 _BASE_DOTS = {}
+_BASE_GUARD = {}
+
+
+def _guard_one(args):
+    """Реальная схема без ответа: при новых параметрах не должно резко стать меньше надписей
+    и точек соединения или резко больше «цепей» из одного вывода (распавшийся текст), чем при
+    исходных. Возвращает множитель 0…1."""
+    project, params = args
+    gray = core.imread(Path(project) / "clean.png")[:, :, 0]
+
+    def stats(res):
+        single = sum(1 for n in res["nets"] if len(n["pins"]) + len(n["labels"]) < 2)
+        return len(res["texts"]), len(res["dots"]), single
+
+    if project not in _BASE_GUARD:
+        _BASE_GUARD[project] = stats(analyzer.analyze_gray(gray, dict(analyzer.DEFAULTS)))
+    t0, d0, s0 = _BASE_GUARD[project]
+    t1, d1, s1 = stats(analyzer.analyze_gray(gray, params))
+    f = 1.0
+    if t0 >= 10 and t1 < 0.75 * t0:
+        f *= t1 / (0.75 * t0)
+    if d0 >= 5 and d1 < 0.6 * d0:
+        f *= d1 / (0.6 * d0)
+    if s1 > 1.6 * s0 + 10:
+        f *= (1.6 * s0 + 10) / s1
+    return f
 
 
 def _real_one(args):
@@ -218,19 +278,19 @@ def log(row):
         f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def tune(n=24, steps=60, seed=None):
+def tune(n=24, steps=60, seed=None, levels=LEVELS_ALL):
     rng = random.Random(seed)
     best = analyzer.load_params()
     workers = max(1, (os.cpu_count() or 2) - 1)
     with ProcessPoolExecutor(workers) as pool:
-        best_m = evaluate(best, n, pool)
+        best_m = evaluate(best, n, pool, levels)
         print(f"старт: score {best_m['score']:.4f}  F1 {best_m['f1']:.3f}  детали {best_m['comps']:.3f}  "
               f"выводы {best_m['pins']:.3f}")
         log({"step": 0, "metrics": best_m, "params": best, "accepted": True})
         for step in range(1, steps + 1):
             strength = 0.25 * (1 - step / (steps + 1)) + 0.05
             cand = perturb(best, rng, strength)
-            m = evaluate(cand, n, pool)
+            m = evaluate(cand, n, pool, levels)
             ok = m["score"] > best_m["score"] + 1e-4
             log({"step": step, "metrics": m, "params": cand, "accepted": ok})
             if ok:
@@ -240,8 +300,18 @@ def tune(n=24, steps=60, seed=None):
                 print(f"шаг {step}: лучше → score {m['score']:.4f}  F1 {m['f1']:.3f}  {changed}")
             else:
                 print(f"шаг {step}: {m['score']:.4f}", end="\r")
-    print(f"\nитог: score {best_m['score']:.4f}  F1 {best_m['f1']:.3f}")
+    print(f"\nитог: score {best_m['score']:.4f}  F1 {best_m['f1']:.3f}  по уровням {best_m['by_level']}")
     return best, best_m
+
+
+def curriculum(n=30, steps=25):
+    """Обучение от простого к сложному: сначала чистые маленькие схемы, потом добавляются
+    сканы, плотные листы, схемы управления и фото телефоном. Параметры переходят со ступени
+    на ступень; на каждой ступени выше оценивается всё пройденное, чтобы не забывать простое."""
+    stages = [(1, 2), (1, 2, 3), (1, 2, 3, 4), (1, 2, 3, 4, 5)]
+    for k, lv in enumerate(stages, 1):
+        print(f"=== ступень {k}: уровни {lv}")
+        tune(n, steps, seed=k, levels=lv)
 
 
 # ---------- классификатор символов ----------
@@ -249,7 +319,8 @@ def tune(n=24, steps=60, seed=None):
 def _symbols_one(args):
     seed, params = args
     img, truth = synth.generate(seed)
-    res = analyzer.analyze_gray(prep(img), params)
+    gray, truth = prep(img, truth)
+    res = analyzer.analyze_gray(gray, params)
     X, y = [], []
     for sy, f in zip(res["symbols"], res["_features"]):
         b = sy["box"]
@@ -306,9 +377,10 @@ def train_symbols(n=80):
 
 
 TYPE_MAP = {"R": "R", "RV": "R", "C": "C", "L": "L", "D": "D", "Z": "D", "Q": "Q", "M": "Q",
-            "IGBT": "Q", "U": "U", "OC": "U", "BR": "U", "J": "PORT", "K": "OTHER", "T": "L", "X": "OTHER",
+            "IGBT": "Q", "U": "U", "OC": "U", "BR": "U", "J": "PORT", "K": "COIL", "T": "L", "X": "OTHER",
             "SENSOR": "SENSOR", "RT": "RT", "TC": "TC", "XTAL": "XTAL", "LED": "LED", "MCU": "MCU", "TERM": "TERM",
-            "ENC": "ENC", "TACHO": "TACHO", "HALL": "HALL"}
+            "ENC": "ENC", "TACHO": "TACHO", "HALL": "HALL",
+            "SW": "SW_NO", "BTN": "BTN", "LAMP": "LAMP", "MOTOR": "MOTOR", "QF": "QF", "F": "FU"}
 
 
 def add_project(project):
@@ -354,6 +426,18 @@ if __name__ == "__main__":
         train_symbols(int(sys.argv[2]) if len(sys.argv) > 2 else 80)
     elif cmd == "add":
         add_project(sys.argv[2])
+    elif cmd == "guard":
+        # python learn.py guard папка_проекта … — добавить реальные схемы (без ответа) в страховку
+        lst = core.load_json(LEARNED / "guard.json") or []
+        for p in sys.argv[2:]:
+            p = str(Path(p).resolve())
+            if p not in lst:
+                lst.append(p)
+        LEARNED.mkdir(exist_ok=True)
+        (LEARNED / "guard.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), encoding="utf-8")
+        print("страховочных схем:", len(lst))
+    elif cmd == "curriculum":
+        curriculum(int(sys.argv[2]) if len(sys.argv) > 2 else 30, int(sys.argv[3]) if len(sys.argv) > 3 else 25)
     elif cmd == "auto":
         # всё сразу: проекты → классификатор → короткий подбор параметров
         for p in registered():

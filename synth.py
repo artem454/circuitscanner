@@ -362,6 +362,157 @@ def hall(sh, cx, cy, rng):
     return [x0, y0, x0 + s, y0 + s], pins
 
 
+# ---------- схемы управления (ГОСТ 2.755 / IEC 60617) ----------
+
+def ctrl(sh, kind, cx, cy, rng, vertical=False):
+    """Элемент схемы управления, выводы слева/справа (или сверху/снизу при vertical).
+    kind: NO, NC, BTN_NO, BTN_NC, COIL, LAMP, THERMAL, FUSE, QF."""
+    c = (cx, cy)
+    L = lambda p: rot(p, c, vertical)
+    t = sh.t
+    half = {"COIL": 22, "LAMP": 18, "THERMAL": 18, "FUSE": 22}.get(kind, 20)
+    a, b = (cx - half, cy), (cx + half, cy)
+    if kind in ("NO", "NC", "BTN_NO", "BTN_NC", "QF"):
+        sh.line(L((cx - half - 8, cy)), L(a))
+        sh.line(L(b), L((cx + half + 8, cy)))
+        tip = (cx + half - 2, cy - 14)                       # подвижный контакт — наклонная черта
+        sh.line(L(a), L(tip))
+        if kind in ("NC", "BTN_NC"):
+            sh.line(L((cx + half - 6, cy - 16)), L(b))      # упор нормально замкнутого
+        if kind.startswith("BTN"):                          # толкатель кнопки (пунктир) и площадка
+            for yy in range(int(cy - 9), int(cy - 30), -5):
+                sh.line(L((cx - 2, yy)), L((cx - 2, yy - 2)), 1)
+            sh.line(L((cx - 10, cy - 32)), L((cx + 6, cy - 32)))
+            sh.line(L((cx - 10, cy - 32)), L((cx - 10, cy - 27)))
+            sh.line(L((cx + 6, cy - 32)), L((cx + 6, cy - 27)))
+        if kind == "QF":                                     # крестик автомата на неподвижном контакте
+            sh.line(L((b[0] - 5, cy - 5)), L((b[0] + 5, cy + 5)))
+            sh.line(L((b[0] - 5, cy + 5)), L((b[0] + 5, cy - 5)))
+        a, b = (cx - half - 8, cy), (cx + half + 8, cy)
+        box = (cx - half - 8, cy - 34, cx + half + 8, cy + 6)
+    elif kind == "COIL":
+        w, h = 30, 18 if rng.random() < 0.5 else 24
+        p0, p1 = L((cx - w / 2, cy - h / 2)), L((cx + w / 2, cy + h / 2))
+        sh.rect(min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1]))
+        sh.line(L(a), L((cx - w / 2, cy)))
+        sh.line(L((cx + w / 2, cy)), L(b))
+        box = (cx - w / 2 - 2, cy - h / 2 - 2, cx + w / 2 + 2, cy + h / 2 + 2)
+    elif kind == "LAMP":
+        r = 13
+        cv2.circle(sh.img, (int(cx), int(cy)), r, INK, t, cv2.LINE_AA)
+        d = r * 0.7
+        sh.line((cx - d, cy - d), (cx + d, cy + d))
+        sh.line((cx - d, cy + d), (cx + d, cy - d))
+        sh.line(L(a), L((cx - r, cy)))
+        sh.line(L((cx + r, cy)), L(b))
+        box = (cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2)
+    elif kind == "THERMAL":                                 # нагреватель теплового реле: прямоугольник со «ступенькой»
+        p0, p1 = L((cx - 12, cy - 10)), L((cx + 12, cy + 10))
+        sh.rect(min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1]))
+        pts = [a, (cx - 4, cy), (cx - 4, cy - 6), (cx + 4, cy - 6), (cx + 4, cy), b]
+        for u, v in zip(pts, pts[1:]):
+            sh.line(L(u), L(v))
+        box = (cx - 14, cy - 12, cx + 14, cy + 12)
+    else:                                                   # FUSE: прямоугольник с линией насквозь
+        w, h = 30, 12
+        p0, p1 = L((cx - w / 2, cy - h / 2)), L((cx + w / 2, cy + h / 2))
+        sh.rect(min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1]))
+        sh.line(L(a), L(b))
+        box = (cx - w / 2 - 2, cy - h / 2 - 2, cx + w / 2 + 2, cy + h / 2 + 2)
+    if vertical:
+        q0, q1 = L(box[:2]), L(box[2:])
+        box = (min(q0[0], q1[0]), min(q0[1], q1[1]), max(q0[0], q1[0]), max(q0[1], q1[1]))
+    pa, pb = L(a), L(b)
+    return [float(v) for v in box], [{"name": "1", "x": pa[0], "y": pa[1], "bx": pa[0], "by": pa[1]},
+                                     {"name": "2", "x": pb[0], "y": pb[1], "bx": pb[0], "by": pb[1]}]
+
+
+def motor(sh, cx, cy):
+    r = 30
+    cv2.circle(sh.img, (int(cx), int(cy)), r, INK, sh.t, cv2.LINE_AA)
+    tw, th = sh.text_size("M")
+    sh.text("M", cx - tw / 2, cy + th / 2)
+    pins = []
+    for k, dx in enumerate((-14, 0, 14)):
+        top = (cx + dx, cy - math.sqrt(r * r - dx * dx))
+        o = (cx + dx, cy - r - 26)
+        sh.line(top, o)
+        pins.append({"name": "UVW"[k], "x": o[0], "y": o[1], "bx": top[0], "by": top[1]})
+    return [cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2], pins
+
+
+CTRL_TYPES = {"NO": "SW_NO", "NC": "SW_NC", "BTN_NO": "BTN", "BTN_NC": "BTN", "COIL": "COIL", "LAMP": "LAMP",
+              "THERMAL": "THERMAL", "FUSE": "FU", "QF": "QF"}
+
+
+def ladder(sh, rng, level):
+    """Лист схемы управления: две шины питания, ступени «контакты → катушка/лампа»,
+    самоподхват (параллельный контакт под кнопкой «Пуск»)."""
+    W, H = sh.W, sh.H
+    xl, xr = 90, W - 90
+    y0, y1 = 80, H - 60
+    names = rng.choice([("L", "N"), ("+24V", "0V"), ("~220V", "N"), ("L1", "L2")])
+    sh.line((xl, y0), (xl, y1))
+    sh.line((xr, y0), (xr, y1))
+    for x, nm in ((xl, names[0]), (xr, names[1])):
+        tw, th = sh.text_size(nm)
+        sh.text(nm, x - tw / 2, y0 - 12)
+    rail_l, rail_n = 1, 2
+    nid = [2]
+
+    def new_net():
+        nid[0] += 1
+        return nid[0]
+
+    n_rungs = max(1, min(2 + level * 2, int((y1 - y0) / 90)))
+    step = (y1 - y0) / (n_rungs + 0.5)
+    cid = 0
+    for r in range(n_rungs):
+        y = int(y0 + step * (r + 0.7))
+        k = rng.randint(1, min(4, 1 + level))
+        kinds = [rng.choice(["BTN_NC", "NC", "THERMAL", "FUSE"]) if i == 0 and rng.random() < 0.5 else
+                 rng.choice(["NO", "NC", "BTN_NO", "BTN_NC", "QF"]) for i in range(k)]
+        kinds.append(rng.choice(["COIL", "COIL", "COIL", "LAMP"]))
+        xs = [int(xl + (xr - xl) * (i + 1) / (len(kinds) + 1)) for i in range(len(kinds))]
+        prev_x, prev_net = xl, rail_l
+        elems = []
+        for i, (kd, x) in enumerate(zip(kinds, xs)):
+            box, pins = ctrl(sh, kd, x, y, rng)
+            cid += 1
+            net_out = rail_n if i == len(kinds) - 1 else new_net()
+            pins[0]["net"], pins[1]["net"] = prev_net, net_out
+            sh.line((prev_x, y), (pins[0]["x"], y))
+            comp = {"id": f"X{cid}", "type": CTRL_TYPES[kd], "box": box, "pins": pins}
+            sh.comps.append(comp)
+            elems.append((comp, kd))
+            lab = {"COIL": "KM", "LAMP": "HL", "BTN_NO": "SB", "BTN_NC": "SB", "THERMAL": "KK", "FUSE": "FU",
+                   "QF": "QF"}.get(kd, rng.choice(["KM", "K", "KT"])) + str(cid)
+            sh.text(lab, box[0], box[1] - 4)
+            prev_x, prev_net = pins[1]["x"], net_out
+        sh.line((prev_x, y), (xr, y))
+        if rng.random() < sh.t_dot_prob:
+            cv2.circle(sh.img, (xl, y), sh.dot_r, INK, -1, cv2.LINE_AA)
+            cv2.circle(sh.img, (xr, y), sh.dot_r, INK, -1, cv2.LINE_AA)
+        starters = [c for c, kd in elems if kd == "BTN_NO"]
+        if starters and rng.random() < 0.7:
+            pl, pr = starters[0]["pins"]
+            ya = y + int(step * 0.45)
+            xa, xb = pl["x"] - 6, pr["x"] + 6
+            box, pins = ctrl(sh, "NO", (xa + xb) / 2, ya, rng)
+            cid += 1
+            pins[0]["net"], pins[1]["net"] = pl["net"], pr["net"]
+            sh.line((xa, y), (xa, ya))
+            sh.line((xb, y), (xb, ya))
+            sh.line((xa, ya), (pins[0]["x"], ya))
+            sh.line((pins[1]["x"], ya), (xb, ya))
+            for x in (xa, xb):
+                if rng.random() < sh.t_dot_prob:
+                    cv2.circle(sh.img, (int(x), y), sh.dot_r, INK, -1, cv2.LINE_AA)
+            sh.comps.append({"id": f"X{cid}", "type": "SW_NO", "box": box, "pins": pins})
+            sh.text("KM" + str(cid), box[0], ya + 22)
+    return cid
+
+
 def ground(sh, cx, cy):
     top = (cx, cy - 22)
     sh.line(top, (cx, cy))
@@ -461,13 +612,30 @@ def route(sh, p, target, net, own_boxes, rng):
 
 # ---------- схема целиком ----------
 
-def generate(seed, hard=None):
+# уровни: размер листа, сетка размещения, заполненность, сила порчи (0 — чистый чертёж … 3 — фото телефоном)
+LEVELS = {1: dict(size=(1100, 800), grid=(5, 4), fill=0.45, degrade=0),
+          2: dict(size=(1500, 1050), grid=(7, 5), fill=0.55, degrade=1),
+          3: dict(size=(1700, 1200), grid=(8, 6), fill=0.62, degrade=1),
+          4: dict(size=(2300, 1600), grid=(11, 8), fill=0.72, degrade=2),
+          5: dict(size=(2800, 2000), grid=(14, 10), fill=0.78, degrade=3)}
+
+
+def generate(seed, hard=None, level=None):
+    """Схема со своим ответом. level 1…5 — от пары деталей на чистом листе до плотной схемы,
+    сфотографированной телефоном. hard=True/False — прежние уровни 4/3."""
     rng = random.Random(seed)
-    hard = rng.random() < 0.5 if hard is None else hard
-    sh = Sheet(rng, *((2300, 1600) if hard else (1700, 1200)))
-    cols, rows = (11, 8) if hard else (8, 6)
+    if level is None:
+        level = (4 if hard else 3) if hard is not None else rng.choice([1, 2, 3, 3, 4, 4, 5])
+    lv = LEVELS[level]
+    sh = Sheet(rng, *lv["size"])
+    if level >= 2 and rng.random() < 0.3:                  # лист схемы управления (лестничная разводка)
+        ladder(sh, rng, level)
+        return _finish(sh, rng, seed, level)
+    cols, rows = lv["grid"]
     sx, sy = sh.W / cols, sh.H / rows
     kinds = ["R"] * 6 + ["C"] * 4 + ["D"] * 3 + ["L"] * 2 + ["Q"] * 2 + ["U"] * 2 + ["G"] * 2 + ["P"] * 2 + ["A"] * 2
+    if level >= 2 and rng.random() < 0.3:                   # элементы управления вперемешку с электроникой
+        kinds += ["W"] * 4 + ["Y"] * 2 + ["F"] * 2 + ["O"]
     if rng.random() < 0.45:                                 # лист КИП / микроконтроллерной платы
         kinds += ["S"] * 4 + ["T"] * 3 + ["K"] * 2 + ["X"] * 2 + ["E"] * 3 + ["M"] * 1 + ["B"] * 3
     if rng.random() < 0.35:                                 # привод: энкодер, тахогенератор, датчики Холла
@@ -475,10 +643,10 @@ def generate(seed, hard=None):
     cid = 0
     refs = {"R": "R", "C": "C", "D": "VD", "L": "L", "Q": "VT", "U": "DD", "G": "", "P": "", "A": "DA",
             "S": "BP", "T": "RK", "K": "BK", "X": "ZQ", "E": "HL", "M": "DD", "B": "XT",
-            "N": "BQ", "V": "BR", "H": "BH"}
+            "N": "BQ", "V": "BR", "H": "BH", "W": "K", "Y": "KM", "F": "HL", "O": "M"}
     for r in range(rows):
         for c in range(cols):
-            if rng.random() > (0.72 if hard else 0.62):
+            if rng.random() > lv["fill"]:
                 continue
             k = rng.choice(kinds)
             cx = int((c + 0.5) * sx + rng.uniform(-sx * 0.15, sx * 0.15))
@@ -513,12 +681,20 @@ def generate(seed, hard=None):
                 box, pins = tacho(sh, cx, cy, rng)
             elif k == "H":
                 box, pins = hall(sh, cx, cy, rng)
+            elif k in "WYF":
+                kd = {"W": rng.choice(["NO", "NC", "BTN_NO", "BTN_NC", "QF"]), "Y": "COIL",
+                      "F": rng.choice(["LAMP", "THERMAL", "FUSE"])}[k]
+                box, pins = ctrl(sh, kd, cx, cy, rng, rng.random() < 0.4)
+            elif k == "O":
+                box, pins = motor(sh, cx, cy)
             else:
                 box, pins = port(sh, cx, cy, rng)
             cid += 1
             typ = {"G": "GND", "P": "PORT", "Q": "Q", "U": "U", "A": "OPAMP", "S": "SENSOR", "T": "RT",
                    "K": "TC", "X": "XTAL", "E": "LED", "M": "MCU", "B": "TERM",
-                   "N": "ENC", "V": "TACHO", "H": "HALL"}.get(k, k)
+                   "N": "ENC", "V": "TACHO", "H": "HALL", "O": "MOTOR"}.get(k, k)
+            if k in "WYF":
+                typ = CTRL_TYPES[kd]
             comp = {"id": f"X{cid}", "type": typ, "box": [float(v) for v in box], "pins": pins}
             sh.comps.append(comp)
             if refs[k]:                                   # позиционное обозначение рядом
@@ -586,27 +762,63 @@ def generate(seed, hard=None):
         for y in range(y0, y1, 18):
             sh.line((x0, y), (x0, min(y + 9, y1)), 1)
             sh.line((x1, y), (x1, min(y + 9, y1)), 1)
-    img, M = degrade(sh.img, rng)
-    truth = {"seed": seed, "comps": [], "pins": []}
+    return _finish(sh, rng, seed, level)
+
+
+def _pt(M, x, y):
+    return cv2.perspectiveTransform(np.array([[[x, y]]], np.float32), M)[0][0]
+
+
+NOTES = ["Все резисторы 0,25 Вт, если не указано иное", "Конденсаторы на 50 В", "Питание от сети 220 В",
+         "Include plug or door sense to prevent operation", "Circuit patent application pending",
+         "Схема электрическая принципиальная", "Monter sur radiateur", "Note: verify against specifications",
+         "Рис. 3. Узел управления", "Fig. 12 Control panel wiring", "Перемычки установить по таблице"]
+
+
+def _texts(sh, rng, level):
+    """Заголовок и абзац примечаний крупным шрифтом — на реальных листах их полно."""
+    if level < 2 or rng.random() > 0.7:
+        return
+    big = rng.uniform(1.0, 1.6) * (1 if sh.font != cv2.FONT_HERSHEY_PLAIN else 2)
+    for _ in range(rng.randint(1, 3)):
+        txt = rng.choice(NOTES)
+        (tw, th), _ = cv2.getTextSize(txt, sh.font, big, 2)
+        for _ in range(20):
+            x, y = rng.randint(10, max(11, sh.W - tw - 10)), rng.randint(th + 10, sh.H - 10)
+            if sh.img[y - th - 4:y + 6, x - 4:x + tw + 4].min() > 200:
+                cv2.putText(sh.img, txt, (x, y), sh.font, big, INK, rng.choice([1, 2, 2]), cv2.LINE_AA)
+                break
+
+
+def _finish(sh, rng, seed, level):
+    _texts(sh, rng, level)
+    strength = LEVELS[level]["degrade"]
+    img, M = degrade(sh.img, rng, strength)
+    if strength >= 3 or (strength == 2 and rng.random() < 0.3):
+        img, M = photo(img, M, rng)
+    truth = {"seed": seed, "level": level, "comps": [], "pins": []}
     for c in sh.comps:
         b = c["box"]
-        corners = np.array([[b[0], b[1]], [b[2], b[1]], [b[0], b[3]], [b[2], b[3]]], np.float32)
-        tc = cv2.transform(corners[None], M)[0]
+        tc = np.array([_pt(M, x, y) for x, y in ((b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3]))])
         truth["comps"].append({"id": c["id"], "type": c["type"],
                                "box": [float(tc[:, 0].min()), float(tc[:, 1].min()),
                                        float(tc[:, 0].max()), float(tc[:, 1].max())]})
         for p in c["pins"]:
-            q = cv2.transform(np.array([[[p["bx"], p["by"]]]], np.float32), M)[0][0]
-            o = cv2.transform(np.array([[[p["x"], p["y"]]]], np.float32), M)[0][0]
+            q, o = _pt(M, p["bx"], p["by"]), _pt(M, p["x"], p["y"])
             truth["pins"].append({"comp": c["id"], "type": c["type"], "pin": p["name"],
                                   "x": float(q[0]), "y": float(q[1]), "ox": float(o[0]), "oy": float(o[1]),
                                   "net": int(p.get("net", 0))})
     return img, truth
 
 
-def degrade(img, rng):
-    """Как скан из книги: наклон, уменьшение, размытие, шум, JPEG, бумага."""
+def degrade(img, rng, strength=1):
+    """Как скан из книги: наклон, уменьшение, размытие, шум, JPEG, бумага.
+    strength 0 — почти чистый чертёж. Возвращает (картинка, матрица 3×3)."""
     h, w = img.shape
+    if strength == 0:
+        f = rng.uniform(0.7, 1.0)
+        out = cv2.resize(img, (int(w * f), int(h * f)), interpolation=cv2.INTER_AREA)
+        return out, np.array([[f, 0, 0], [0, f, 0], [0, 0, 1]], np.float64)
     ang = rng.uniform(-0.8, 0.8)
     f = rng.uniform(0.45, 1.0)
     M = cv2.getRotationMatrix2D((w / 2, h / 2), ang, f)
@@ -630,7 +842,40 @@ def degrade(img, rng):
     out = np.clip(out, 0, 255).astype(np.uint8)
     q = rng.randint(35, 95)
     out = cv2.imdecode(cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, q])[1], cv2.IMREAD_GRAYSCALE)
-    return out, M
+    return out, np.vstack([M, [0, 0, 1]])
+
+
+def photo(img, M, rng):
+    """Фото листа телефоном: лист на столе, перспектива, тёплый свет, тень, виньетка,
+    лёгкий расфокус, цветной шум, JPEG. Возвращает цветную картинку и итоговую 3×3."""
+    h, w = img.shape
+    pad = int(max(h, w) * rng.uniform(0.08, 0.2))
+    W, H = w + 2 * pad, h + 2 * pad
+    gen = np.random.default_rng(rng.randint(0, 1 << 30))
+    base = np.array([rng.uniform(40, 150), rng.uniform(40, 130), rng.uniform(30, 110)], np.float32)
+    table = np.ones((H, W, 3), np.float32) * base
+    table += cv2.GaussianBlur(gen.normal(0, 25, (H, W)).astype(np.float32), (0, 0), 6)[..., None]
+    j = lambda: rng.uniform(-0.06, 0.06) * max(w, h)
+    src = np.array([[0, 0], [w, 0], [w, h], [0, h]], np.float32)
+    dst = np.array([[pad + j(), pad + j()], [pad + w + j(), pad + j()], [pad + w + j(), pad + h + j()],
+                    [pad + j(), pad + h + j()]], np.float32)
+    P = cv2.getPerspectiveTransform(src, dst)
+    tint = np.array([rng.uniform(0.85, 1.0), rng.uniform(0.9, 1.0), 1.0], np.float32)
+    page = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR).astype(np.float32) * tint
+    warped = cv2.warpPerspective(page, P, (W, H), flags=cv2.INTER_LINEAR, borderValue=(0, 0, 0))
+    mask = cv2.warpPerspective(np.ones((h, w), np.float32), P, (W, H))
+    out = table * (1 - mask[..., None]) + warped * mask[..., None]
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    cx, cy = rng.uniform(0, W), rng.choice([0, H])
+    shade = np.exp(-(((xx - cx) / (0.5 * W)) ** 2 + ((yy - cy) / (0.35 * H)) ** 2))
+    out *= (1 - rng.uniform(0.2, 0.5) * shade)[..., None]
+    vig = 1 - 0.35 * (((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2) / 2
+    out *= vig[..., None]
+    out = cv2.GaussianBlur(out, (0, 0), rng.uniform(0.6, 1.4))
+    out += gen.normal(0, rng.uniform(3, 8), out.shape)
+    out = np.clip(out, 0, 255).astype(np.uint8)
+    out = cv2.imdecode(cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, rng.randint(60, 90)])[1], cv2.IMREAD_COLOR)
+    return out, P @ M
 
 
 if __name__ == "__main__":
@@ -640,7 +885,7 @@ if __name__ == "__main__":
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
     for i in range(int(sys.argv[2]) if len(sys.argv) > 2 else 5):
-        img, truth = generate(1000 + i)
+        img, truth = generate(1000 + i, level=int(sys.argv[3]) if len(sys.argv) > 3 else None)
         cv2.imwrite(str(out / f"synth_{i:03d}.png"), img)
         (out / f"synth_{i:03d}.json").write_text(json.dumps(truth), encoding="utf-8")
         nets = {p["net"] for p in truth["pins"]}

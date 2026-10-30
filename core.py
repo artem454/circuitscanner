@@ -31,6 +31,8 @@ TYPES = {
     "SENSOR": "датчик КИП (давление, расход, уровень, температура…)", "RT": "терморезистор (Pt100, NTC)",
     "TC": "термопара", "XTAL": "кварцевый резонатор", "LED": "светодиод", "MCU": "микроконтроллер",
     "TERM": "клеммник", "ENC": "энкодер", "TACHO": "тахогенератор", "HALL": "датчик Холла / приближения",
+    "SW": "контакт (реле, пускателя, концевик)", "BTN": "кнопка", "QF": "автоматический выключатель",
+    "LAMP": "лампа / индикатор", "MOTOR": "двигатель",
     "X": "прочее",
 }
 # Порядок выводов для SPICE
@@ -120,9 +122,77 @@ def rotate(img, angle):
                           borderMode=cv2.BORDER_REPLICATE)
 
 
+def is_negative(gray):
+    """Негатив / светлые линии на тёмном: фон (медиана) тёмный, а светлых пикселей мало."""
+    return float(np.median(gray)) < 100 and float((gray > 170).mean()) < 0.35
+
+
+def find_page(img_bgr):
+    """Лист бумаги на фото: самый большой выпуклый четырёхугольник. Возвращает 4 угла
+    (по часовой от левого верхнего) или None, если лист занимает весь кадр или не найден."""
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    s = 800 / max(h, w)
+    small = cv2.resize(gray, None, fx=s, fy=s, interpolation=cv2.INTER_AREA) if s < 1 else gray.copy()
+    s = min(s, 1.0)
+    # признаки листа: яркость и «белизна» (светлое и бесцветное — бумага, а не стол)
+    hsv = cv2.cvtColor(cv2.resize(img_bgr, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_AREA),
+                       cv2.COLOR_BGR2HSV)
+    white = cv2.subtract(hsv[..., 2], hsv[..., 1])
+    area = small.shape[0] * small.shape[1]
+    best, best_a = None, 0
+    for ch in (small, white):
+        blur = cv2.GaussianBlur(ch, (5, 5), 0)
+        _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))   # текст и линии не рвут лист
+        th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8))
+        cnts, _ = cv2.findContours(th, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:3]:
+            a = cv2.contourArea(c)
+            if a < 0.25 * area or a > 0.97 * area or a <= best_a:
+                continue
+            hull = cv2.convexHull(c)
+            for eps in (0.02, 0.03, 0.05):
+                approx = cv2.approxPolyDP(hull, eps * cv2.arcLength(hull, True), True)
+                if len(approx) == 4 and cv2.isContourConvex(approx):
+                    best, best_a = approx.reshape(4, 2).astype(np.float32) / s, a
+                    break
+    if best is None:
+        return None
+    # снаружи листа должен быть стол: заметно темнее или цветнее бумаги. Иначе это рамка
+    # внутри чертежа, и обрезать по ней нельзя
+    mask = np.zeros(small.shape, np.uint8)
+    cv2.fillConvexPoly(mask, (best * s).astype(np.int32), 255)
+    inside, outside = white[mask > 0], white[mask == 0]
+    if outside.size < 0.02 * area or float(np.median(outside)) > float(np.median(inside)) - 40:
+        return None
+    sm, df = best.sum(1), np.diff(best, axis=1).ravel()
+    return np.array([best[np.argmin(sm)], best[np.argmin(df)], best[np.argmax(sm)], best[np.argmax(df)]],
+                    np.float32)
+
+
+def rectify(img_bgr):
+    """Фото листа → вид строго сверху. Возвращает (картинка, матрица 3×3 или None)."""
+    quad = find_page(img_bgr)
+    if quad is None:
+        return img_bgr, None
+    h, w = img_bgr.shape[:2]
+    tl, tr, br, bl = quad
+    tilt = max(abs(tl[1] - tr[1]), abs(bl[1] - br[1]), abs(tl[0] - bl[0]), abs(tr[0] - br[0]))
+    if tilt < 0.01 * max(h, w) and cv2.contourArea(quad) > 0.85 * h * w:
+        return img_bgr, None                       # лист и так ровный и на весь кадр — не обрезаем
+    W = int(max(np.linalg.norm(tr - tl), np.linalg.norm(br - bl)))
+    H = int(max(np.linalg.norm(bl - tl), np.linalg.norm(br - tr)))
+    dst = np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], np.float32)
+    M = cv2.getPerspectiveTransform(quad, dst)
+    return cv2.warpPerspective(img_bgr, M, (W, H), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE), M
+
+
 def clean(img_bgr):
     """Убирает цветной фон/тени и растягивает контраст. Возвращает серое изображение."""
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    if is_negative(gray):
+        gray = 255 - gray
     k = max(15, (max(gray.shape) // 40) | 1)
     bg = cv2.morphologyEx(gray, cv2.MORPH_CLOSE,
                           cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
@@ -207,6 +277,10 @@ def prepare(image_path, project_dir=None, cells_long=12, tile_cells=3, deskew=Tr
         shutil.copyfile(image_path, original)
 
     img = imread(original)
+    if deskew:
+        img, persp = rectify(img)                  # фото листа под углом → вид сверху
+    else:
+        persp = None
     angle = estimate_skew(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)) if deskew else 0.0
     if abs(angle) > 0.15:
         img = rotate(img, angle)
@@ -246,7 +320,7 @@ def prepare(image_path, project_dir=None, cells_long=12, tile_cells=3, deskew=Tr
 
     manifest = {
         "created": datetime.now().isoformat(timespec="seconds"),
-        "image": image_path.name, "deskew_deg": round(angle, 2),
+        "image": image_path.name, "deskew_deg": round(angle, 2), "perspective": persp is not None,
         "grid": grid, "tile_cells": tile_cells, "tiles": tiles,
     }
     (project / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1),
@@ -328,6 +402,9 @@ def task_text(manifest):
 Датчик 4–20 мА (SENSOR) — `+`/`-`, в номинале диапазон и сигнал: «PT 0-16 bar 4-20mA».
 Энкодер (ENC) — A, B, Z, +U, 0V и «1024 имп» в номинале; тахогенератор (TACHO) — «20V/1000rpm»;
 терморезистор (RT) — «Pt100» / «NTC 10k B3950»; термопара (TC) — «тип K»; кварц — «8MHz CL=20p».
+Схемы управления: катушка пускателя/реле — `K` (выводы A1/A2), контакты — `SW` (в номинале «NO 13-14» или
+«NC 21-22», тепловое реле — «тепловое реле NC 95-96»), кнопки — `BTN` («Пуск NO», «Стоп NC»), автомат — `QF`,
+лампа — `LAMP`, двигатель — `MOTOR` (U/V/W). Контакт аппарата обозначай как «KM1.1», «KM1.2».
 Мощность резистора, если указана, — в номинале: «47 5W». Напряжения питания — в метках цепей: «+24 В», «+3,3 В».
 Земля: `GND`. Цепь с одним выводом помечай `"port": true`, если это внешний вывод или метка.
 

@@ -302,6 +302,27 @@ def drop_frame_v(vw, W, H):
     return [s for s in vw if not (s[3] - s[1] > 0.8 * H and (s[0] < 0.08 * W or s[0] > 0.92 * W))]
 
 
+def drop_through_text(segs, words, sw):
+    """Линия, которая проходит насквозь через несколько надписей, — край листа, сгиб,
+    царапина на скане. Провода надписи обходят."""
+    if not words:
+        return segs
+    B = np.array([w["box"] for w in words], dtype=float)
+    out = []
+    for s in segs:
+        x0, y0, x1, y1 = s
+        pad = sw
+        hit = (B[:, 0] - pad < max(x0, x1)) & (B[:, 2] + pad > min(x0, x1)) & \
+              (B[:, 1] - pad < max(y0, y1)) & (B[:, 3] + pad > min(y0, y1))
+        if y0 == y1:                                    # горизонталь проходит через середину слова
+            inside = hit & (B[:, 1] + 0.25 * (B[:, 3] - B[:, 1]) < y0) & (y0 < B[:, 3] - 0.25 * (B[:, 3] - B[:, 1]))
+        else:
+            inside = hit & (B[:, 0] + 0.25 * (B[:, 2] - B[:, 0]) < x0) & (x0 < B[:, 2] - 0.25 * (B[:, 2] - B[:, 0]))
+        if int(inside.sum()) < 3:
+            out.append(s)
+    return out
+
+
 def drop_dashed(segs, axis, sw, min_len):
     """Пунктир: ≥4 коротких отрезка на одной прямой с похожими длинами и промежутками."""
     by_line = {}
@@ -510,6 +531,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
 
     hw, vw = drop_frame(hw, vw, W, H), drop_frame_v(vw, W, H)
     hw, vw = drop_dashed(hw, 0, sw, min_len), drop_dashed(vw, 1, sw, min_len)
+    hw, vw = drop_through_text(hw, words, sw), drop_through_text(vw, words, sw)
 
     # короткий отрезок со свободными концами, в середину которого упёрся или
     # который пересёк провод, — штрих символа: полоска диода, обкладка, основание
@@ -620,6 +642,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
 
     res = {
         "scale": s, "stroke": round(sw / s, 2), "ocr": texts_ok, "params": P,
+        # схема — почти чисто чёрно-белая; фото платы/прибора — много полутонов
+        "midtones": round(float(((gray0 > 70) & (gray0 < 190)).mean()), 3),
         "segments": [[sc(v) for v in sg] for sg in segs],
         "dots": [[sc(x), sc(y)] for x, y, _ in dots],
         "texts": [], "symbols": [], "nets": [],
@@ -750,10 +774,15 @@ def render(project, manifest, gray0, res):
 def auto_netlist(res):
     """Черновик в формате программы: символы → компоненты, цепи N… → выводы."""
     texts = {t["id"]: t for t in res["texts"]}
-    known = {"R", "C", "L", "D", "Z", "Q", "M", "U", "J"}
+    # класс символа → тип детали netlist
+    known = {"R": "R", "C": "C", "L": "L", "D": "D", "Z": "Z", "Q": "Q", "M": "M", "U": "U", "J": "J",
+             "OPAMP": "U", "MCU": "MCU", "SENSOR": "SENSOR", "RT": "RT", "TC": "TC", "XTAL": "XTAL", "LED": "LED",
+             "TERM": "TERM", "ENC": "ENC", "TACHO": "TACHO", "HALL": "HALL", "PORT": "J",
+             "SW_NO": "SW", "SW_NC": "SW", "BTN": "BTN", "COIL": "K", "LAMP": "LAMP", "THERMAL": "SW",
+             "FU": "F", "QF": "QF", "MOTOR": "MOTOR"}
     comps = {}
     for sy in res["symbols"]:
-        comps[sy["id"]] = {"ref": sy["id"], "type": sy["kind"] if sy["kind"] in known else "X",
+        comps[sy["id"]] = {"ref": sy["id"], "type": known.get(sy["kind"], "X"),
                            "value": "", "cell": sy.get("cell", ""), "pins": {}, "confidence": "low"}
         near = [texts[t]["text"] or t for t in sy["near_text"]]
         if near:
@@ -778,9 +807,13 @@ def auto_netlist(res):
 
 def summary(res):
     real = [n for n in res["nets"] if len(n["pins"]) + len(n["labels"]) >= 2]
+    warn = ""
+    if res.get("midtones", 0) > 0.12:
+        warn = (f"; ВНИМАНИЕ: {res['midtones'] * 100:.0f} % полутонов — похоже на фото платы или прибора, "
+                "а не на схему; разбор без ИИ здесь ненадёжен")
     return (f"символов {len(res['symbols'])}, проводов {len(res['segments'])}, точек {len(res['dots'])}, "
             f"надписей {len(res['texts'])}, цепей {len(real)} (с ≥2 выводами/метками), "
-            f"OCR {'есть' if res['ocr'] else 'нет'}, классификатор {'есть' if res.get('classified') else 'нет'}")
+            f"OCR {'есть' if res['ocr'] else 'нет'}, классификатор {'есть' if res.get('classified') else 'нет'}" + warn)
 
 
 if __name__ == "__main__":
