@@ -217,13 +217,17 @@ def _guard_one(args):
 
     def stats(res):
         single = sum(1 for n in res["nets"] if len(n["pins"]) + len(n["labels"]) < 2)
-        return len(res["texts"]), len(res["dots"]), single
+        return len(res["texts"]), len(res["dots"]), single, len(res["segments"]), len(res["symbols"])
 
     if project not in _BASE_GUARD:
         _BASE_GUARD[project] = stats(analyzer.analyze_gray(gray, dict(analyzer.DEFAULTS)))
-    t0, d0, s0 = _BASE_GUARD[project]
-    t1, d1, s1 = stats(analyzer.analyze_gray(gray, params))
+    t0, d0, s0, g0, y0 = _BASE_GUARD[project]
+    t1, d1, s1, g1, y1 = stats(analyzer.analyze_gray(gray, params))
     f = 1.0
+    if g1 > 2 * g0 + 30:                        # провода «размножились» — рвутся символы и текст
+        f *= (2 * g0 + 30) / g1
+    if y1 > 2 * y0 + 15:
+        f *= (2 * y0 + 15) / y1
     if t0 >= 10 and t1 < 0.75 * t0:
         f *= t1 / (0.75 * t0)
     if d0 >= 5 and d1 < 0.6 * d0:
