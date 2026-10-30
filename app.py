@@ -10,6 +10,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 from datetime import datetime
@@ -19,7 +20,11 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 
 from PIL import Image, ImageTk
 
+import analyzer
 import core
+import diagnose
+
+HERE = Path(__file__).resolve().parent
 
 LEVEL_RU = {"error": "ошибка", "warn": "внимание", "question": "вопрос", "info": "инфо"}
 LEVEL_COLOR = {"error": "#c62828", "warn": "#b26a00", "question": "#6a1b9a", "info": "#555"}
@@ -38,7 +43,10 @@ class App(tk.Tk):
         self.notes = []
         self.nl_mtime = None
         self.img = None            # PIL, чистая картинка в пикселях оригинала
-        self.view_bg = "source"    # source | clean
+        self.view_bg = "source"    # source | clean | analysis
+        self.analysis = None       # результат analyzer.analyze
+        self.diag = None
+        self.train_proc = None
         self.zoom = 1.0
         self.off = [0.0, 0.0]
         self.hl_refs = set()       # подсвеченные компоненты
@@ -76,9 +84,11 @@ class App(tk.Tk):
         ttk.Checkbutton(bar, text="Выпрямлять наклон", variable=self.var_deskew).pack(side="left", padx=6)
         ttk.Button(bar, text="Пересобрать фрагменты", command=self.rebuild).pack(side="left")
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(bar, text="Анализ без ИИ", command=self.run_analysis).pack(side="left", padx=4)
         ttk.Button(bar, text="Задание для Claude", command=self.copy_task).pack(side="left")
         ttk.Button(bar, text="Экспорт", command=self.export).pack(side="left", padx=4)
         ttk.Button(bar, text="Папка проекта", command=self.open_folder).pack(side="left")
+        ttk.Button(bar, text="Дообучить", command=self.train).pack(side="left", padx=4)
 
         self.status = tk.StringVar(value="Откройте картинку схемы или папку проекта.")
         ttk.Label(self, textvariable=self.status, anchor="w", relief="sunken",
@@ -91,7 +101,7 @@ class App(tk.Tk):
         vbar = ttk.Frame(left)
         vbar.pack(side="top", fill="x")
         ttk.Button(vbar, text="Вписать", command=self.fit).pack(side="left", padx=2, pady=2)
-        ttk.Button(vbar, text="Оригинал / чистая", command=self.toggle_bg).pack(side="left", padx=2)
+        ttk.Button(vbar, text="Оригинал / чистая / цепи", command=self.toggle_bg).pack(side="left", padx=2)
         ttk.Button(vbar, text="Снять подсветку", command=self.clear_hl).pack(side="left", padx=2)
         self.var_grid = tk.BooleanVar(value=True)
         self.var_marks = tk.BooleanVar(value=True)
@@ -119,6 +129,7 @@ class App(tk.Tk):
         self.tv_note = self._tree(self.tabs, "Мои вопросы", [("cell", "Клетка", 60), ("text", "Текст", 330)])
         ttk.Button(self.tv_note.master, text="Удалить выбранный вопрос",
                    command=self.delete_note).pack(side="bottom", fill="x", before=self.tv_note)
+        self._build_diag_tab()
 
         for lvl, color in LEVEL_COLOR.items():
             self.tv_issue.tag_configure(lvl, foreground=color)
@@ -141,6 +152,148 @@ class App(tk.Tk):
         c.bind("<B1-Motion>", self.on_motion)
         c.bind("<ButtonRelease-1>", self.on_release)
         c.bind("<Button-3>", self.on_right)
+
+    def _build_diag_tab(self):
+        frame = ttk.Frame(self.tabs)
+        self.tabs.add(frame, text="Диагностика")
+        box = ttk.LabelFrame(frame, text="Симптомы", padding=4)
+        box.pack(fill="x")
+        self.sym_vars = {}
+        for i, (key, text) in enumerate(diagnose.SYMPTOMS.items()):
+            v = tk.BooleanVar(value=False)
+            self.sym_vars[key] = v
+            ttk.Checkbutton(box, text=text, variable=v).grid(row=i // 2, column=i % 2, sticky="w")
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=2)
+        ttk.Button(row, text="Найти причины", command=self.run_diag).pack(side="left")
+        ttk.Button(row, text="Деталь неисправна", command=lambda: self.record_repair("faulty")).pack(side="left", padx=4)
+        ttk.Button(row, text="Деталь исправна", command=lambda: self.record_repair("ok")).pack(side="left")
+        ttk.Button(row, text="Условия (physics.json)", command=self.open_physics).pack(side="left", padx=4)
+        inner = ttk.Frame(frame)
+        inner.pack(fill="both", expand=True)
+        tv = ttk.Treeview(inner, columns=("p", "ref", "what"), show="headings", selectmode="browse")
+        for key, head, width in (("p", "%", 50), ("ref", "Деталь", 80), ("what", "Отказ / слабое место", 300)):
+            tv.heading(key, text=head)
+            tv.column(key, width=width, stretch=key == "what")
+        sb = ttk.Scrollbar(inner, orient="vertical", command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tv.pack(fill="both", expand=True)
+        for lvl, color in (("высокий", "#c62828"), ("средний", "#b26a00"), ("низкий", "#555"), ("информация", "#555")):
+            tv.tag_configure(lvl, foreground=color)
+        tv.bind("<<TreeviewSelect>>", self.on_diag)
+        self.tv_diag = tv
+
+    def run_diag(self):
+        if not self.project or not self.netlist:
+            return messagebox.showinfo("Диагностика", "Нужен netlist.json: сначала распознайте схему.")
+        syms = [k for k, v in self.sym_vars.items() if v.get()]
+        try:
+            self.diag = diagnose.diagnose(self.project, syms)
+        except Exception as e:
+            return messagebox.showerror("Диагностика", str(e))
+        tv = self.tv_diag
+        tv.delete(*tv.get_children())
+        for i, r in enumerate(self.diag["risks"]):
+            if r["level"] == "информация":
+                continue
+            tv.insert("", "end", iid=f"r{i}", tags=(r["level"],),
+                      values=("⚠", ", ".join(r["refs"][:3]), f"[{r['level']}] {r['text']}"))
+        for i, c in enumerate(self.diag["candidates"]):
+            tv.insert("", "end", iid=f"c{i}", values=(f"{c['p'] * 100:.1f}", c["ref"], c["mode"]))
+        self.status.set(f"Диагностика: {len(self.diag['candidates'])} кандидатов, "
+                        f"слабых мест {len(self.diag['risks'])}, учтено ремонтов {self.diag['repairs_used']}. "
+                        f"Отчёт с формулами — diagnosis.md")
+
+    def on_diag(self, _=None):
+        sel = self.tv_diag.selection()
+        if not sel or not self.diag:
+            return
+        kind, i = sel[0][0], int(sel[0][1:])
+        if kind == "r":
+            r = self.diag["risks"][i]
+            refs = r["refs"]
+            parts = [(f"[{r['level']}] {r['text']}\n", "h"), (", ".join(refs) + "\n\n", None), (r["why"] + "\n", None)]
+        else:
+            c = self.diag["candidates"][i]
+            refs = [c["ref"]]
+            parts = [(f"{c['ref']} {c['value']} — {c['mode']} ({c['p'] * 100:.1f} %)\n", "h"),
+                     ("роль: " + ", ".join(c["roles"]) + "\n", None)]
+            parts += [(f"• {w}\n", None) for w in c["why"]]
+            parts.append((f"\nКак проверить: {c['check']}\n", None))
+        self.hl_refs = set(refs)
+        self.hl_cells = self._cells_of(refs)
+        self._set_detail(parts)
+        self._focus_cells()
+
+    def record_repair(self, result):
+        sel = self.tv_diag.selection()
+        if not sel or not sel[0].startswith("c"):
+            return messagebox.showinfo("Ремонт", "Выберите деталь в списке кандидатов.")
+        c = self.diag["candidates"][int(sel[0][1:])]
+        syms = [k for k, v in self.sym_vars.items() if v.get()]
+        diagnose.record(self.project, c["ref"], result, syms)
+        self.status.set(f"Записано: {c['ref']} — {'неисправна' if result == 'faulty' else 'исправна'}. "
+                        f"Модель учтёт это в следующих диагнозах.")
+        self.run_diag()
+
+    def open_physics(self):
+        if self.project:
+            p = self.project / "physics.json"
+            if not p.exists():
+                import physics
+                p.write_text(json.dumps(physics.DEFAULT_SETTINGS, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.startfile(p)
+
+    # ---------- анализ без ИИ и обучение ----------
+
+    def run_analysis(self, quiet=False):
+        if not self.project:
+            return
+        self.status.set("Анализ без ИИ: провода, точки, символы, цепи…")
+
+        def work():
+            try:
+                res = analyzer.analyze(self.project, ocr=True,
+                                       progress=lambda m: self.after(0, self.status.set, f"Анализ: {m}…"))
+                self.after(0, self._analysis_done, res)
+            except Exception as e:
+                self.after(0, self.status.set, f"Анализ не удался: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _analysis_done(self, res):
+        self.analysis = res
+        self.status.set("Анализ без ИИ: " + analyzer.summary(res) +
+                        ". Цепи — кнопка «Оригинал / чистая / цепи»; Claude получит их подсказкой.")
+        if self.view_bg == "analysis":
+            self._load_bg()
+            self.redraw()
+
+    def train(self, project=None, quiet=False):
+        """Дообучение в отдельном процессе, чтобы окно не зависало."""
+        if self.train_proc and self.train_proc.poll() is None:
+            if not quiet:
+                self.status.set("Обучение уже идёт…")
+            return
+        args = ["add", str(project)] if project else ["auto", "60", "20"]
+        (HERE / "learned").mkdir(exist_ok=True)
+        log = open(HERE / "learned" / "last_train.log", "w", encoding="utf-8")
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        self.train_proc = subprocess.Popen([sys.executable, str(HERE / "learn.py")] + args, cwd=HERE,
+                                           stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
+        self.status.set("Обучение: " + ("добавляю проверенную схему в примеры…" if project else
+                                        "проекты → классификатор символов → параметры (несколько минут)…"))
+        self.after(2000, self._train_wait)
+
+    def _train_wait(self):
+        if self.train_proc and self.train_proc.poll() is None:
+            return self.after(2000, self._train_wait)
+        try:
+            tail = (HERE / "learned" / "last_train.log").read_text(encoding="utf-8").replace("\r", "\n")
+            last = [l for l in tail.splitlines() if l.strip()][-1:]
+        except Exception:
+            last = []
+        self.status.set("Обучение завершено. " + (last[0] if last else ""))
 
     def _tree(self, nb, title, cols):
         frame = ttk.Frame(nb)
@@ -180,6 +333,7 @@ class App(tk.Tk):
                 p = core.prepare(image, project, cells, tile, deskew,
                                  progress=lambda k, n: self.after(0, self.status.set, f"Фрагменты: {k}/{n}"))
                 self.after(0, self.open_project, p)
+                self.after(100, self.run_analysis)          # сразу и анализ без ИИ
             except Exception as e:
                 self.after(0, messagebox.showerror, "Ошибка подготовки", str(e))
         threading.Thread(target=work, daemon=True).start()
@@ -209,12 +363,24 @@ class App(tk.Tk):
             self.fit()
 
     def _load_bg(self):
+        if self.view_bg == "analysis":
+            res = self.analysis or core.load_json(self.project / "analysis" / "analysis.json")
+            if res:
+                gray = core.imread(self.project / "clean.png")[:, :, 0]
+                bgr = analyzer.draw(gray, res, 1)
+                self.img = Image.fromarray(bgr[:, :, ::-1])
+                return
+            self.view_bg = "source"
         name = "source.png" if self.view_bg == "source" else "clean.png"
         self.img = Image.open(self.project / name).convert("RGB")
 
     def toggle_bg(self):
         if self.project:
-            self.view_bg = "clean" if self.view_bg == "source" else "source"
+            order = ["source", "clean", "analysis"]
+            self.view_bg = order[(order.index(self.view_bg) + 1) % 3]
+            if self.view_bg == "analysis" and not (self.analysis or (self.project / "analysis" / "analysis.json").exists()):
+                self.status.set("Цепей ещё нет — нажмите «Анализ без ИИ».")
+                self.view_bg = "source"
             self._load_bg()
             self.redraw()
 
@@ -280,6 +446,9 @@ class App(tk.Tk):
                     self.status.set(f"netlist.json обновлён {datetime.now():%H:%M:%S}: "
                                     f"{len(self.comps)} компонентов, {len(self.nets)} цепей, "
                                     f"замечаний: {len(self.issues)}")
+                    # схема без ошибок — сама становится учебным примером для анализатора
+                    if self.netlist and not any(i["level"] == "error" for i in self.issues):
+                        self.after(3000, lambda: self.train(self.project, quiet=True))
         self.after(1500, self._poll)
 
     def copy_task(self):
@@ -287,6 +456,9 @@ class App(tk.Tk):
             return messagebox.showinfo("Нет проекта", "Сначала откройте картинку.")
         text = (f"Разбери схему в папке {self.project.resolve()} — прочитай там CLAUDE_TASK.md "
                 f"и сделай по нему netlist.json.")
+        if (self.project / "analysis" / "analysis.json").exists():
+            text += (" Там же в analysis/ лежит разбор без ИИ (цветные цепи в analysis/tiles, черновик "
+                     "netlist_auto.json) — используй как подсказку, но сверяй с картинкой.")
         if self.notes:
             text += " В notes.json есть мои вопросы и поправки — учти их."
         self.clipboard_clear()
