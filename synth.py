@@ -51,6 +51,11 @@ class Sheet:
         return w, h
 
 
+VALUES = {"R": ["10", "22", "100", "270", "470", "1k", "2.2k", "4.7k", "10k", "47k", "100k", "1M", "2k7", "0.22"],
+          "C": ["10n", "22p", "47n", "100n", "0.1", "1μ", "10μ", "47μ", "100μ", "470μ", "4.7n", "2.2μ"],
+          "L": ["10μ", "100μ", "1m", "47μ", "2.2m"]}
+
+
 def rot(p, c, vertical):
     """Повернуть точку p вокруг c на 90°, если деталь вертикальная."""
     if not vertical:
@@ -488,6 +493,7 @@ def ladder(sh, rng, level):
             lab = {"COIL": "KM", "LAMP": "HL", "BTN_NO": "SB", "BTN_NC": "SB", "THERMAL": "KK", "FUSE": "FU",
                    "QF": "QF"}.get(kd, rng.choice(["KM", "K", "KT"])) + str(cid)
             sh.text(lab, box[0], box[1] - 4)
+            comp["ref"] = lab
             prev_x, prev_net = pins[1]["x"], net_out
         sh.line((prev_x, y), (xr, y))
         if rng.random() < sh.t_dot_prob:
@@ -508,7 +514,7 @@ def ladder(sh, rng, level):
             for x in (xa, xb):
                 if rng.random() < sh.t_dot_prob:
                     cv2.circle(sh.img, (int(x), y), sh.dot_r, INK, -1, cv2.LINE_AA)
-            sh.comps.append({"id": f"X{cid}", "type": "SW_NO", "box": box, "pins": pins})
+            sh.comps.append({"id": f"X{cid}", "type": "SW_NO", "box": box, "pins": pins, "ref": "KM" + str(cid)})
             sh.text("KM" + str(cid), box[0], ya + 22)
     return cid
 
@@ -695,7 +701,7 @@ def generate(seed, hard=None, level=None):
                    "N": "ENC", "V": "TACHO", "H": "HALL", "O": "MOTOR"}.get(k, k)
             if k in "WYF":
                 typ = CTRL_TYPES[kd]
-            comp = {"id": f"X{cid}", "type": typ, "box": [float(v) for v in box], "pins": pins}
+            comp = {"id": f"X{cid}", "type": typ, "box": [float(v) for v in box], "pins": pins, "kind": k}
             sh.comps.append(comp)
             if refs[k]:                                   # позиционное обозначение рядом
                 lab = f"{refs[k]}{cid}"
@@ -703,6 +709,16 @@ def generate(seed, hard=None, level=None):
                 tx, ty = box[0], box[1] - 6
                 if ty - th > 0 and sh.img[int(ty - th):int(ty), int(tx):int(tx + tw)].min() > 128:
                     sh.text(lab, tx, ty)
+                    comp["ref"] = lab
+            if k in "RCL":                                # номинал под деталью или справа
+                val = rng.choice(VALUES[k])
+                tw, th = sh.text_size(val)
+                for tx, ty in ((box[0], box[3] + th + 6), (box[2] + 6, (box[1] + box[3]) / 2 + th / 2)):
+                    if (0 < tx and tx + tw < sh.W and th < ty < sh.H and
+                            sh.img[int(ty - th - 2):int(ty + 3), int(tx - 2):int(tx + tw + 2)].min() > 128):
+                        sh.text(val, tx, ty)
+                        comp["value"] = val
+                        break
     # цепи: группы из 2–4 ближайших свободных выводов
     allp = [(c, p) for c in sh.comps for p in c["pins"]]
     rng.shuffle(allp)
@@ -800,7 +816,7 @@ def _finish(sh, rng, seed, level):
     for c in sh.comps:
         b = c["box"]
         tc = np.array([_pt(M, x, y) for x, y in ((b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3]))])
-        truth["comps"].append({"id": c["id"], "type": c["type"],
+        truth["comps"].append({"id": c["id"], "type": c["type"], "ref": c.get("ref"), "value": c.get("value"),
                                "box": [float(tc[:, 0].min()), float(tc[:, 1].min()),
                                        float(tc[:, 0].max()), float(tc[:, 1].max())]})
         for p in c["pins"]:

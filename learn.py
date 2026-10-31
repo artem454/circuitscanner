@@ -7,6 +7,7 @@
     python learn.py auto [N] [шагов]    — дообучить всё: проекты, символы, параметры
     python learn.py curriculum [N] [шагов] — по ступеням: от чистых простых схем до фото сложных
     python learn.py guard проект …      — реальные схемы без ответа: страховка от переобучения
+    python learn.py ocr [N]             — дообучить распознавание надписей на N учебных схемах
 
 Оценка: для каждой пары выводов сравнивается «в одной цепи / в разных» по ответу
 и по анализатору (F1), плюс доля найденных деталей. Подбор — случайный поиск
@@ -359,6 +360,71 @@ def save_examples(X, y, src):
     return len(y)
 
 
+def _ocr_one(args):
+    """Учебная схема: для каждой подписи (обозначение/номинал) найти надпись анализатора
+    рядом с деталью и вырезать буквы, если их число совпало с ответом."""
+    import ocr as ocrmod
+    seed, params = args
+    img, truth = synth.generate(seed)
+    gray, truth = prep(img, truth)
+    res = analyzer.analyze_gray(gray, params)
+    eng = _ocr_one.engine = getattr(_ocr_one, "engine", None) or ocrmod.OCR()
+    out = []
+    for c in truth["comps"]:
+        for label in (c.get("ref"), c.get("value")):
+            if not label:
+                continue
+            b = c["box"]
+            cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+            size = max(b[2] - b[0], b[3] - b[1])
+            best = None
+            for t in res["texts"]:
+                tb = t["box"]
+                d = analyzer.box_dist(b, (tb[0] + tb[2]) / 2, (tb[1] + tb[3]) / 2)
+                if d < 1.5 * size and (best is None or d < best[0]):
+                    best = (d, t)
+            if best:
+                out += [(f.tolist(), ch) for f, ch in
+                        ocrmod.learn_word(eng, gray, best[1]["box"], best[1]["vertical"], label)]
+    return out
+
+
+def train_ocr(n=300):
+    """Самообучение OCR на учебных схемах (буквы в настоящих условиях: мелкий кегль, скан, фото)
+    и на проверенных проектах (обозначения из netlist.json)."""
+    import ocr as ocrmod
+    params = analyzer.load_params()
+    workers = max(1, (os.cpu_count() or 2) - 1)
+    X, y = [], []
+    with ProcessPoolExecutor(workers) as pool:
+        for pairs in pool.map(_ocr_one, [(40000 + i, params) for i in range(n)], chunksize=4):
+            for f, ch in pairs:
+                X.append(f)
+                y.append(ch)
+    eng = ocrmod.OCR()
+    for proj in registered():                         # реальные: обозначение у детали в своей клетке
+        proj = Path(proj)
+        nl = core.load_json(proj / "netlist.json")
+        an = core.load_json(proj / "analysis" / "analysis.json")
+        man = core.load_json(proj / "manifest.json")
+        if not (nl and an and man):
+            continue
+        gray = core.imread(proj / "clean.png")[:, :, 0]
+        cell = man["grid"]["cell"]
+        refs = {c["ref"]: core.parse_cell(c.get("cell", "")) for c in nl["components"]}
+        for t in an["texts"]:
+            tb = t["box"]
+            cc = (int((tb[0] + tb[2]) / 2 // cell), int((tb[1] + tb[3]) / 2 // cell))
+            for ref, pc in refs.items():
+                if pc and abs(pc[0] - cc[0]) <= 1 and abs(pc[1] - cc[1]) <= 1 and \
+                        ocrmod.fix_ref(eng.word(gray, tb, t["vertical"])[0] or "") == ref:
+                    for f, ch in ocrmod.learn_word(eng, gray, tb, t["vertical"], ref):
+                        X.append(f.tolist())
+                        y.append(ch)
+    total = ocrmod.save_extra(X, y)
+    print(f"вырезано букв из схем: {len(y)}, всего в дообучении: {total}")
+
+
 def train_symbols(n=80):
     params = analyzer.load_params()
     workers = max(1, (os.cpu_count() or 2) - 1)
@@ -440,6 +506,8 @@ if __name__ == "__main__":
         LEARNED.mkdir(exist_ok=True)
         (LEARNED / "guard.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), encoding="utf-8")
         print("страховочных схем:", len(lst))
+    elif cmd == "ocr":
+        train_ocr(int(sys.argv[2]) if len(sys.argv) > 2 else 300)
     elif cmd == "curriculum":
         curriculum(int(sys.argv[2]) if len(sys.argv) > 2 else 30, int(sys.argv[3]) if len(sys.argv) > 3 else 25)
     elif cmd == "auto":

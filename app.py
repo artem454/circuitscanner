@@ -86,6 +86,7 @@ class App(tk.Tk):
         ttk.Button(bar, text="Пересобрать фрагменты", command=self.rebuild).pack(side="left")
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
         ttk.Button(bar, text="Анализ без ИИ", command=self.run_analysis).pack(side="left", padx=4)
+        ttk.Button(bar, text="Netlist без ИИ", command=self.run_autonet).pack(side="left")
         ttk.Button(bar, text="Задание для Claude", command=self.copy_task).pack(side="left")
         ttk.Button(bar, text="Экспорт", command=self.export).pack(side="left", padx=4)
         ttk.Button(bar, text="Папка проекта", command=self.open_folder).pack(side="left")
@@ -351,6 +352,33 @@ class App(tk.Tk):
         if self.view_bg == "analysis":
             self._load_bg()
             self.redraw()
+
+    def run_autonet(self):
+        """Собрать netlist самостоятельно (OCR + разбор). Проверенный netlist.json не затирается."""
+        if not self.project:
+            return messagebox.showinfo("Нет проекта", "Сначала откройте картинку.")
+        self.status.set("Netlist без ИИ: разбор и чтение надписей…")
+
+        def work():
+            try:
+                import autonet
+                nl = autonet.run(self.project, progress=lambda m: self.after(0, self.status.set, f"Netlist без ИИ: {m}…"))
+                self.after(0, self._autonet_done, nl)
+            except Exception as e:
+                self.after(0, self.status.set, f"Netlist без ИИ не удался: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _autonet_done(self, nl):
+        n = len(nl["components"])
+        named = sum(1 for c in nl["components"] if "?" not in c["ref"])
+        vals = sum(1 for c in nl["components"] if c["value"])
+        if nl.get("_file") == "netlist.json":
+            self.load_netlist()
+            where = "netlist.json — открыт во вкладках"
+        else:
+            where = "netlist_autonet.json (проверенный netlist.json не тронут)"
+        self.status.set(f"Netlist без ИИ: деталей {n}, с прочитанным обозначением {named}, с номиналом {vals} → {where}. "
+                        "Это черновик: сверяйте по картинке или отдайте Claude на доработку.")
 
     def train(self, project=None, quiet=False):
         """Дообучение в отдельном процессе, чтобы окно не зависало."""
