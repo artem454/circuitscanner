@@ -18,6 +18,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -352,7 +353,7 @@ def save_examples(X, y, src):
     s = np.array([src] * len(y))
     if path.exists():
         d = np.load(path, allow_pickle=False)
-        keep = d["src"] != src if src == "synth" else np.ones(len(d["y"]), bool)
+        keep = d["src"] != src                  # пример с того же листа заменяется, а не копится
         X = np.concatenate([d["X"][keep], X])
         y = np.concatenate([d["y"][keep], y])
         s = np.concatenate([d["src"][keep], s])
@@ -465,33 +466,70 @@ TYPE_MAP = {"R": "R", "RV": "R", "C": "C", "L": "L", "D": "D", "Z": "D", "Q": "Q
             "SW": "SW_NO", "BTN": "BTN", "LAMP": "LAMP", "MOTOR": "MOTOR", "QF": "QF", "F": "FU"}
 
 
-def add_project(project):
-    """Проверенный проект: символ ↔ компонент из netlist.json по клетке (один к одному)."""
+# корпуса-прямоугольники (R, U, разъёмы) классификатор не трогает — для разметки «символов» они не в счёт
+RECT_CLASSES = {"R", "U", "PORT", "MCU", "TERM", "OTHER"}
+
+
+def _cell_xy(cell):
+    m = re.match(r"([A-Z]+)(\d+)", str(cell).upper())
+    if not m:
+        return None
+    col = 0
+    for ch in m.group(1):
+        col = col * 26 + ord(ch) - 64
+    return col - 1, int(m.group(2)) - 1
+
+
+def real_examples(project, res=None):
+    """Примеры символов с проверенного листа. Клетки netlist.json приблизительны, поэтому:
+    «не деталь» (OTHER) — символ, рядом с которым (его клетки и соседние) по ответу нет ни одной
+    символьной детали; тип — когда в клетке ровно одна символьная деталь и ровно один символ."""
     project = Path(project)
     nl = core.load_json(project / "netlist.json")
-    if not nl:
+    cell = core.load_json(project / "manifest.json")["grid"]["cell"]
+    res = res or analyzer.analyze(project, ocr=False)
+    comps = {}
+    for c in nl.get("components", []):
+        cls = TYPE_MAP.get(c.get("type", "X"), "OTHER")
+        xy = _cell_xy(c.get("cell", ""))
+        if cls not in RECT_CLASSES and xy:
+            comps.setdefault(xy, []).append(cls)
+    cand = []
+    for sy, f in zip(res["symbols"], res["_features"]):
+        if sy["kind"] in ("R", "U") or sy.get("kind") in ("GND", "PORT"):
+            continue
+        x0, y0, x1, y1 = sy["box"]
+        span = {(int(x // cell), int(y // cell)) for x in (x0, x1) for y in (y0, y1)}
+        cand.append((span, f))
+    X, y = [], []
+    per_cell = {}
+    for span, f in cand:
+        near = {(cx + dx, cy + dy) for cx, cy in span for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+        if not any(comps.get(c) for c in near):
+            X.append(f)
+            y.append("OTHER")
+        elif len(span) == 1:
+            per_cell.setdefault(next(iter(span)), []).append(f)
+    for xy, fs in per_cell.items():
+        if len(fs) == 1 and len(comps.get(xy, [])) == 1:
+            X.append(fs[0])
+            y.append(comps[xy][0])
+    return X, y
+
+
+def add_project(project):
+    """Проверенный проект → примеры для классификатора символов (заменяют прежние с этого листа)."""
+    project = Path(project)
+    if not core.load_json(project / "netlist.json"):
         raise SystemExit("в проекте нет netlist.json")
     register(project)
-    res = analyzer.analyze(project, ocr=False)
-    by_cell_c, by_cell_s = {}, {}
-    for c in nl.get("components", []):
-        by_cell_c.setdefault(c.get("cell", "").upper(), []).append(c)
-    for sy, f in zip(res["symbols"], res["_features"]):
-        by_cell_s.setdefault(sy["cell"].upper(), []).append(f)
-    X, y = [], []
-    for cell, comps in by_cell_c.items():
-        syms = by_cell_s.get(cell, [])
-        types = {TYPE_MAP.get(c.get("type", "X"), "OTHER") for c in comps}
-        if len(syms) == 1 and len(comps) == 1 or (len(types) == 1 and len(syms) == len(comps)):
-            for f in syms:
-                X.append(f)
-                y.append(types.pop() if len(types) == 1 else "OTHER")
-                types = types or {y[-1]}
+    X, y = real_examples(project)
     if not X:
-        print("не нашлось клеток, где символ и компонент сопоставляются однозначно")
+        print("не нашлось символов, которые можно однозначно разметить")
         return
-    total = save_examples(X, y, "real")
-    print(f"добавлено {len(X)} примеров из {project.name}; всего {total}")
+    total = save_examples(X, y, "real:" + project.name)
+    stats = {k: int(v) for k, v in zip(*np.unique(y, return_counts=True))}
+    print(f"{project.name}: {len(X)} примеров {stats}; всего {total}")
 
 
 if __name__ == "__main__":
@@ -501,7 +539,7 @@ if __name__ == "__main__":
         workers = max(1, (os.cpu_count() or 2) - 1)
         with ProcessPoolExecutor(workers) as pool:
             m = evaluate(analyzer.load_params(), n, pool)
-        print(json.dumps({k: round(v, 4) for k, v in m.items()}, ensure_ascii=False))
+        print(json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in m.items()}, ensure_ascii=False))
     elif cmd == "tune":
         tune(int(sys.argv[2]) if len(sys.argv) > 2 else 24, int(sys.argv[3]) if len(sys.argv) > 3 else 60)
     elif cmd == "symbols":

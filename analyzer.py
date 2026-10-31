@@ -36,6 +36,7 @@ LEARNED = Path(__file__).resolve().parent / "learned"
 # Все пороги — в долях толщины линии sw (кроме явно оговорённых)
 DEFAULTS = {
     "target": 2400,         # до какого размера (px) увеличивать картинку
+    "thin_upscale": 1,      # линии в 1 px — разбирать в двойном масштабе (0 — выключить)
     "text_max": 12.0,       # макс. размер буквы
     "min_len": 7.0,         # мин. длина провода
     "tol": 2.0,             # допуск касания: tol·sw + 2
@@ -227,6 +228,33 @@ def edge_continuations(ink, box, others, sw, L):
         if hits >= 0.85 * len(pts):
             n += 1
     return n
+
+
+def two_lead_resistors(symbols, pins, W, H):
+    """Небольшой корпус-прямоугольник с ровно двумя выводами: выводы на противоположных
+    коротких сторонах — резистор (даже если тонкие линии не дали сработать порогу по толщине
+    штриха), на середине длинных сторон друг напротив друга — обкладка электролита."""
+    by_sym = {}
+    for p in pins:
+        by_sym.setdefault(p["symbol"], []).append((p["x"], p["y"]))
+    for k, sy in enumerate(symbols):
+        if sy["kind"] not in ("R", "U") or sy.get("cells", 1) != 1 or len(by_sym.get(k, [])) != 2:
+            continue
+        x0, y0, x1, y1 = sy["box"]
+        w, h = x1 - x0, y1 - y0
+        if max(w, h) < 1.6 * min(w, h) or max(w, h) > 8 * min(w, h) or max(w, h) > 0.06 * max(W, H):
+            continue
+        (ax, ay), (bx, by) = by_sym[k]
+        horiz = w >= h                                   # длинная сторона горизонтальна
+        u, v = (ax, bx) if horiz else (ay, by)           # вдоль длинной стороны
+        lo, hi, span = (x0, x1, w) if horiz else (y0, y1, h)
+        a2, b2 = (ay, by) if horiz else (ax, bx)         # поперёк
+        lo2, hi2, span2 = (y0, y1, h) if horiz else (x0, x1, w)
+        if min(u, v) <= lo + 0.25 * span and max(u, v) >= hi - 0.25 * span:
+            sy["kind"] = "R"
+        elif (min(a2, b2) <= lo2 + 0.3 * span2 and max(a2, b2) >= hi2 - 0.3 * span2
+              and abs(u - v) <= 0.25 * span and abs((u + v) / 2 - (lo + hi) / 2) <= 0.25 * span):
+            sy["kind"] = "C"
 
 
 def find_rects(ink, sw, W, H, P):
@@ -507,6 +535,14 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     step("бинаризация")
     ink = binarize(gray)
     sw = stroke_width(ink)
+    if P.get("thin_upscale", 1) and s == 1 and sw <= 1.2 and max(H0, W0) <= 1.6 * P["target"]:
+        # линии в 1 px: короткие выводы между соседними деталями короче минимального
+        # провода и теряются — разбираем в двойном масштабе
+        s = 2
+        gray = cv2.resize(gray0, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        H, W = gray.shape
+        ink = binarize(gray)
+        sw = stroke_width(ink)
     tol = P["tol"] * sw + 2
     min_len = int(max(P["min_len"] * sw, 12))
 
@@ -559,7 +595,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     g = int(P["sym_grow"] * sw) + 1
     grow = cv2.dilate(resid, cv2.getStructuringElement(cv2.MORPH_RECT, (g, g)))
     n, lab, st, _ = cv2.connectedComponentsWithStats(grow, connectivity=8)
-    symbols = [{"box": r["box"], "kind": r["kind"]} for r in rects]
+    symbols = [{"box": r["box"], "kind": r["kind"], "cells": r["cells"]} for r in rects]
     for i in range(1, n):
         x, y, w, h, _ = st[i]
         real = int(np.count_nonzero(resid[y:y + h, x:x + w][lab[y:y + h, x:x + w] == i]))
@@ -628,6 +664,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         else:
             net["dangling"] += 1
 
+    two_lead_resistors(symbols, pins, W, H)
     texts_ok = try_ocr(gray, words) if ocr else False
     feats = []
     for k, sy in enumerate(symbols):
