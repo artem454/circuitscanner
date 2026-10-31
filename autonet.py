@@ -28,7 +28,8 @@ import ocr as ocrmod
 KIND2TYPE = {"R": "R", "C": "C", "L": "L", "D": "D", "Z": "Z", "Q": "Q", "M": "M", "U": "U", "J": "J",
              "OPAMP": "U", "MCU": "MCU", "SENSOR": "SENSOR", "RT": "RT", "TC": "TC", "XTAL": "XTAL", "LED": "LED",
              "TERM": "TERM", "ENC": "ENC", "TACHO": "TACHO", "HALL": "HALL", "SW_NO": "SW", "SW_NC": "SW",
-             "BTN": "BTN", "COIL": "K", "LAMP": "LAMP", "THERMAL": "SW", "FU": "F", "QF": "QF", "MOTOR": "MOTOR"}
+             "BTN": "BTN", "COIL": "K", "LAMP": "LAMP", "THERMAL": "SW", "FU": "F", "QF": "QF", "MOTOR": "MOTOR",
+             "VS": "VS", "OC": "OC", "LOGIC": "U"}
 # буквы обозначения → тип
 PREFIX2TYPE = {"R": "R", "RP": "R", "C": "C", "L": "L", "VD": "D", "D": "D", "VT": "Q", "Q": "Q", "T": "Q",
                "DA": "U", "DD": "U", "U": "U", "IC": "U", "K": "K", "KM": "K", "KK": "SW", "SB": "BTN", "SA": "SW",

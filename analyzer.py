@@ -500,22 +500,29 @@ class SymbolModel:
     """k ближайших соседей по сохранённым примерам learned/symbols.npz."""
 
     def __init__(self, path=LEARNED / "symbols.npz"):
-        self.X = self.y = None
+        self.X = self.y = self.trusted = None
         if Path(path).exists():
             d = np.load(path, allow_pickle=False)
             self.X, self.y = d["X"].astype(np.float32), d["y"]
+            # класс, известный только по своей синтетике (нет ни эталона, ни примера с реального листа),
+            # на реальных схемах ошибался почти всегда — такой ответ не выдаём
+            src = d["src"] if "src" in d.files else None
+            self.trusted = set(map(str, self.y[src != "synth"])) if src is not None and (src != "synth").any() else None
 
     def ready(self):
         return self.X is not None and len(self.X) >= 10
 
-    def predict(self, f, k=5):
+    def predict(self, f, k=5, trusted_only=True):
         sims = self.X[:, :-2] @ f[:-2] - 0.5 * np.abs(self.X[:, -2] - f[-2])
         idx = np.argsort(-sims)[:k]
         votes = {}
         for i in idx:
             votes[str(self.y[i])] = votes.get(str(self.y[i]), 0) + max(sims[i], 0)
         lab = max(votes, key=votes.get)
-        return lab, round(float(votes[lab] / (sum(votes.values()) + 1e-6)), 2)
+        conf = round(float(votes[lab] / (sum(votes.values()) + 1e-6)), 2)
+        if trusted_only and self.trusted is not None and lab not in self.trusted:
+            return "OTHER", conf
+        return lab, conf
 
 
 # ---------- главное ----------
@@ -816,7 +823,7 @@ def auto_netlist(res):
              "OPAMP": "U", "MCU": "MCU", "SENSOR": "SENSOR", "RT": "RT", "TC": "TC", "XTAL": "XTAL", "LED": "LED",
              "TERM": "TERM", "ENC": "ENC", "TACHO": "TACHO", "HALL": "HALL", "PORT": "J",
              "SW_NO": "SW", "SW_NC": "SW", "BTN": "BTN", "COIL": "K", "LAMP": "LAMP", "THERMAL": "SW",
-             "FU": "F", "QF": "QF", "MOTOR": "MOTOR"}
+             "FU": "F", "QF": "QF", "MOTOR": "MOTOR", "VS": "VS", "OC": "OC", "LOGIC": "U"}
     comps = {}
     for sy in res["symbols"]:
         comps[sy["id"]] = {"ref": sy["id"], "type": known.get(sy["kind"], "X"),
