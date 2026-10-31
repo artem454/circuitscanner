@@ -34,7 +34,7 @@ PREFIX2TYPE = {"R": "R", "RP": "R", "C": "C", "L": "L", "VD": "D", "D": "D", "VT
                "DA": "U", "DD": "U", "U": "U", "IC": "U", "K": "K", "KM": "K", "KK": "SW", "SB": "BTN", "SA": "SW",
                "HL": "LAMP", "FU": "F", "F": "F", "QF": "QF", "XT": "TERM", "XS": "J", "XP": "J", "X": "J", "J": "J",
                "BQ": "ENC", "BH": "HALL", "KT": "K", "BR": "TACHO", "BP": "SENSOR", "BK": "TC", "RK": "RT", "ZQ": "XTAL", "M": "MOTOR",
-               "VS": "X", "TR": "T", "Z": "Z"}
+               "VS": "VS", "TR": "T", "Z": "Z"}
 # совместимость типов (класс символа и буква обозначения могут разойтись законно)
 COMPAT = {("Q", "M"), ("M", "Q"), ("D", "Z"), ("Z", "D"), ("D", "LED"), ("LED", "D"), ("LAMP", "LED"),
           ("U", "MCU"), ("MCU", "U"), ("SW", "BTN"), ("BTN", "SW"), ("R", "RT"), ("RT", "R"), ("J", "TERM"),

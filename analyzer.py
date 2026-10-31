@@ -242,7 +242,7 @@ def two_lead_resistors(symbols, pins, W, H):
             continue
         x0, y0, x1, y1 = sy["box"]
         w, h = x1 - x0, y1 - y0
-        if max(w, h) < 1.6 * min(w, h) or max(w, h) > 8 * min(w, h) or max(w, h) > 0.06 * max(W, H):
+        if max(w, h) < 1.6 * min(w, h) or max(w, h) > 8 * min(w, h) or max(w, h) > 0.08 * max(W, H):
             continue
         (ax, ay), (bx, by) = by_sym[k]
         horiz = w >= h                                   # длинная сторона горизонтальна

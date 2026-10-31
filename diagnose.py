@@ -112,6 +112,12 @@ MODES = {
               "проверить диодным тестером К-Э и встречный диод модуля"),
              ("обрыв / не открывается", 0.4, {"no_output", "one_channel", "weak"},
               "проверить открывание от источника 15 В через резистор")],
+    "VS": [("пробой (КЗ анод–катод / A1–A2)", 1.0, {"fuse", "trips", "no_stop", "smoke", "overheat", "protection"},
+            "омметром A–K (A1–A2) в обе стороны: должно быть > 100 кОм; КЗ — пробит"),
+           ("не открывается (обрыв управляющего перехода, перегорел)", 0.7, {"no_start", "no_output", "one_channel", "weak"},
+            "G–K (G–A1) 10…100 Ом; открывание от батареи 9 В с лампой: ток в G — лампа горит"),
+           ("самопроизвольно открывается (dU/dt, помехи, нет снаббера)", 0.5, {"no_stop", "unstable", "hum"},
+            "осмотреть RC-снаббер (обрыв R или C), резистор G–K, наводки на провод управления")],
     "Q": [("пробой переходов", 0.8, {"no_output", "unstable", "protection", "smoke"},
            "диодной прозвонкой Б-Э, Б-К; К-Э не должно звониться"),
           ("утечка / потеря усиления", 0.3, {"weak", "after_time", "unstable"},
@@ -393,7 +399,7 @@ class Circuit:
         hv = max((self.volt.get(n, 0) for n in nets), default=0)
         roles = []
         text = (c.get("note", "") + " " + " ".join(nets)).lower()
-        if t in ("M", "IGBT") and hv >= 60:
+        if t in ("M", "IGBT", "VS") and hv >= 60:
             roles.append("power_switch")
         if t == "C" and ("+" in pins or (val and val >= 47e-6)) and hv >= 60:
             roles.append("bus_cap")

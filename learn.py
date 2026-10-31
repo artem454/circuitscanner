@@ -460,7 +460,7 @@ def train_symbols(n=80):
 
 
 TYPE_MAP = {"R": "R", "RV": "R", "C": "C", "L": "L", "D": "D", "Z": "D", "Q": "Q", "M": "Q",
-            "IGBT": "Q", "U": "U", "OC": "U", "BR": "U", "J": "PORT", "K": "COIL", "T": "L", "X": "OTHER",
+            "IGBT": "Q", "VS": "D", "U": "U", "OC": "U", "BR": "U", "J": "PORT", "K": "COIL", "T": "L", "X": "OTHER",
             "SENSOR": "SENSOR", "RT": "RT", "TC": "TC", "XTAL": "XTAL", "LED": "LED", "MCU": "MCU", "TERM": "TERM",
             "ENC": "ENC", "TACHO": "TACHO", "HALL": "HALL",
             "SW": "SW_NO", "BTN": "BTN", "LAMP": "LAMP", "MOTOR": "MOTOR", "QF": "QF", "F": "FU"}
