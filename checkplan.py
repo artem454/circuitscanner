@@ -310,9 +310,39 @@ class Planner:
                 self.add("Под напряжением", [ref], f"Напряжение цепи {lbl} (у {ref}) относительно {gnd}", exp,
                          "по расчёту схемы; отличие больше допуска сужает поиск до узла этой цепи")
 
-    def control_chain(self):
-        """Путь «источник → контакты → катушка»: где пропало напряжение — там разомкнутый элемент."""
+    def _trace(self, start, avoid):
+        """От вывода катушки через контакты, кнопки, предохранители до источника (вывод схемы или
+        цепь с известным напряжением). Возвращает (источник, [(цепь, элемент, следующая к катушке)…])."""
         sw = ("SW", "BTN", "F", "QF")
+        if self.c.meta.get(start, {}).get("port") or abs(self.U.get(start, 0)) > 1:
+            return start, []
+        prev = {start: None}
+        queue, src = [start], None
+        while queue:
+            n = queue.pop(0)
+            if n != start and (self.c.meta.get(n, {}).get("port") or abs(self.U.get(n, 0)) > 1):
+                src = n
+                break
+            for r in self.c.neighbors(n):
+                if self.c.comps[r].get("type") not in sw:
+                    continue
+                pins = self.c.pins(r)
+                for m in pins.values():
+                    if m not in prev and m != avoid and (len(pins) == 2 or self._same_pole(pins, n, m)):
+                        prev[m] = (n, r)
+                        queue.append(m)
+        if not src:
+            return None, []
+        path, n = [], src
+        while prev[n]:
+            nxt, r = prev[n]
+            path.append((n, r, nxt))
+            n = nxt
+        return src, path
+
+    def control_chain(self):
+        """Путь «источник → контакты → катушка → контакты → обратный провод»: где пропало
+        напряжение — там разомкнутый элемент. Щуп «минус» — на источник обратного провода."""
         for coil, cc in self.c.comps.items():
             if cc.get("type") != "K":
                 continue
@@ -320,29 +350,11 @@ class Planner:
             a1, a2 = p.get("A1"), p.get("A2")
             if not a1:
                 continue
-            ret = a2 or "N"
-            prev = {a1: None}
-            queue, src = [a1], None
-            while queue:
-                n = queue.pop(0)
-                if n != a1 and (self.c.meta.get(n, {}).get("port") or abs(self.U.get(n, 0)) > 1) and n != ret:
-                    src = n
-                    break
-                for r in self.c.neighbors(n):
-                    if self.c.comps[r].get("type") not in sw:
-                        continue
-                    pins = self.c.pins(r)
-                    for m in pins.values():
-                        if m not in prev and m != ret and (len(pins) == 2 or self._same_pole(pins, n, m)):
-                            prev[m] = (n, r)
-                            queue.append(m)
+            src, path = self._trace(a1, a2)
             if not src:
                 continue
-            path, n = [], src
-            while prev[n]:
-                nxt, r = prev[n]
-                path.append((n, r, nxt))
-                n = nxt
+            ret, rpath = self._trace(a2, a1) if a2 else ("N", [])
+            ret = ret or a2 or "N"
             us = abs(self.U.get(src, 0))
             if str(self.c.meta.get(src, {}).get("label", "")).lstrip().startswith("~"):
                 us /= 1.414
@@ -356,6 +368,11 @@ class Planner:
                 self.add("Цепь управления", [r], f"Шаг {i}: точка {nxt} (после {r} {rc.get('value', '')})",
                          f"{unom} относительно {ret}; 0 В при напряжении в {n} — {r}: {self._open_why(r)}",
                          "падение на замкнутом контакте под током > 1 В — контакт обгорел")
+            for n, r, nxt in rpath:                  # обратный провод: от катушки к источнику
+                rc = self.c.comps[r]
+                self.add("Цепь управления", [r], f"Обратный провод: {r} {rc.get('value', '')} (между {nxt} и {n})",
+                         f"напряжение на элементе ≈ 0 В; {unom} на нём — {r}: {self._open_why(r)}",
+                         "на A1 катушки напряжение есть, а она не включается — ищите разрыв здесь")
 
     def _open_why(self, r):
         t, roles = self.c.comps[r].get("type"), self.c.roles[r]
@@ -424,6 +441,8 @@ class Planner:
                    re.sub(rf"\b{re.escape(r)}\b", "#", s["expect"]), s["why"])
             if key in idx:
                 m = idx[key]
+                if r in m["refs"]:
+                    continue                             # тот же шаг у второй катушки (общий участок цепи)
                 m["refs"].append(r)
                 if s["cell"] and s["cell"] not in m["cell"].split(", "):
                     m["cell"] = ", ".join(x for x in (m["cell"], s["cell"]) if x)
