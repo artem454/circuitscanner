@@ -139,9 +139,16 @@ def find_page(img_bgr):
     hsv = cv2.cvtColor(cv2.resize(img_bgr, (small.shape[1], small.shape[0]), interpolation=cv2.INTER_AREA),
                        cv2.COLOR_BGR2HSV)
     white = cv2.subtract(hsv[..., 2], hsv[..., 1])
+    # «гладкость»: бумага ровная, а ковёр, гранит, дерево — пёстрые. Мелкие линии схемы
+    # тоже дают разброс, поэтому разброс считаем на сильно размытой картинке
+    f = small.astype(np.float32)
+    mu = cv2.blur(f, (9, 9))
+    std = np.sqrt(np.maximum(cv2.blur(f * f, (9, 9)) - mu * mu, 0))
+    std = cv2.GaussianBlur(std, (0, 0), 6)
+    smooth = cv2.normalize(-std, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     area = small.shape[0] * small.shape[1]
     best, best_a = None, 0
-    for ch in (small, white):
+    for ch in (small, white, smooth):
         blur = cv2.GaussianBlur(ch, (5, 5), 0)
         _, th = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((15, 15), np.uint8))   # текст и линии не рвут лист
@@ -164,7 +171,10 @@ def find_page(img_bgr):
     mask = np.zeros(small.shape, np.uint8)
     cv2.fillConvexPoly(mask, (best * s).astype(np.int32), 255)
     inside, outside = white[mask > 0], white[mask == 0]
-    if outside.size < 0.02 * area or float(np.median(outside)) > float(np.median(inside)) - 40:
+    s_in, s_out = std[mask > 0], std[mask == 0]
+    darker = float(np.median(outside)) <= float(np.median(inside)) - 40
+    rougher = s_out.size and float(np.median(s_out)) > 1.8 * float(np.median(s_in)) + 2
+    if outside.size < 0.02 * area or not (darker or rougher):
         return None
     sm, df = best.sum(1), np.diff(best, axis=1).ravel()
     return np.array([best[np.argmin(sm)], best[np.argmin(df)], best[np.argmax(sm)], best[np.argmax(df)]],
@@ -186,6 +196,42 @@ def rectify(img_bgr):
     dst = np.array([[0, 0], [W - 1, 0], [W - 1, H - 1], [0, H - 1]], np.float32)
     M = cv2.getPerspectiveTransform(quad, dst)
     return cv2.warpPerspective(img_bgr, M, (W, H), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE), M
+
+
+def text_orientation(gray):
+    """Повёрнут ли лист на 90°: сравнить, сколько букв стоят в «строках» по горизонтали
+    и по вертикали. Буква — мелкое пятно; строка — соседи на одной высоте (или вертикали)."""
+    _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    n, _, st, cen = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    H, W = gray.shape
+    lim = max(H, W) / 40
+    ok = (st[:, 2] < lim) & (st[:, 3] < lim) & (st[:, 4] > 8)
+    ok[0] = False
+    P, S = cen[ok], st[ok]
+    if len(P) < 30:
+        return 0
+    hor = ver = 0
+    for i in range(len(P)):
+        d = np.abs(P - P[i])
+        size = max(S[i, 2], S[i, 3])
+        near = (d[:, 0] + d[:, 1] > 0) & (d[:, 0] + d[:, 1] < 2.5 * size)
+        hor += int(np.count_nonzero(near & (d[:, 1] < 0.25 * size)))
+        ver += int(np.count_nonzero(near & (d[:, 0] < 0.25 * size)))
+    if ver > 1.4 * hor:
+        return 90
+    return 0
+
+
+def title_block_corner(gray):
+    """Насколько правый нижний угол «плотнее» левого верхнего: штамп чертежа (рамки и
+    текст) стоит справа внизу. > 1 — лист стоит правильно, < 1 — вверх ногами."""
+    _, ink = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    H, W = ink.shape
+    h, w = int(H * 0.22), int(W * 0.35)
+    m = int(min(H, W) * 0.03)                       # край листа и тени не считаем
+    br = ink[H - h - m:H - m, W - w - m:W - m].mean()
+    tl = ink[m:h + m, m:w + m].mean()
+    return (br + 1) / (tl + 1)
 
 
 def clean(img_bgr):
@@ -286,6 +332,16 @@ def prepare(image_path, project_dir=None, cells_long=12, tile_cells=3, deskew=Tr
         img = rotate(img, angle)
     else:
         angle = 0.0
+    turned = 0
+    if deskew and text_orientation(clean(img)) == 90:
+        # лист снят боком: на фото альбомный лист обычно повёрнут по часовой — возвращаем
+        a = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        b = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+        # из двух поворотов выбрать тот, где штамп оказался справа внизу
+        if title_block_corner(clean(b)) > title_block_corner(clean(a)):
+            img, turned = b, -90
+        else:
+            img, turned = a, 90
     gray = clean(img)
     H, W = gray.shape
     imwrite(project / "source.png", img)
@@ -320,7 +376,7 @@ def prepare(image_path, project_dir=None, cells_long=12, tile_cells=3, deskew=Tr
 
     manifest = {
         "created": datetime.now().isoformat(timespec="seconds"),
-        "image": image_path.name, "deskew_deg": round(angle, 2), "perspective": persp is not None,
+        "image": image_path.name, "deskew_deg": round(angle, 2), "perspective": persp is not None, "turned": turned,
         "grid": grid, "tile_cells": tile_cells, "tiles": tiles,
     }
     (project / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1),

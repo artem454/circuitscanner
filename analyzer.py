@@ -808,9 +808,15 @@ def auto_netlist(res):
 def summary(res):
     real = [n for n in res["nets"] if len(n["pins"]) + len(n["labels"]) >= 2]
     warn = ""
-    if res.get("midtones", 0) > 0.12:
-        warn = (f"; ВНИМАНИЕ: {res['midtones'] * 100:.0f} % полутонов — похоже на фото платы или прибора, "
+    mt = res.get("midtones", 0)
+    # пороги — по реальным фото: схемы с телефона и синьки до ≈0,21, фото техники от ≈0,23
+    if mt > 0.22:
+        warn = (f"; ВНИМАНИЕ: {mt * 100:.0f} % полутонов — похоже на фото платы или прибора, "
                 "а не на схему; разбор без ИИ здесь ненадёжен")
+    elif mt > 0.12:
+        warn = f"; низкий контраст ({mt * 100:.0f} % полутонов: синька или фото) — разбор без ИИ менее надёжен"
+    if len(res["texts"]) > 2.5 * max(len(res["segments"]), 1) and len(res["segments"]) < 120:
+        warn += "; похоже на страницу текста, а не на схему"
     return (f"символов {len(res['symbols'])}, проводов {len(res['segments'])}, точек {len(res['dots'])}, "
             f"надписей {len(res['texts'])}, цепей {len(real)} (с ≥2 выводами/метками), "
             f"OCR {'есть' if res['ocr'] else 'нет'}, классификатор {'есть' if res.get('classified') else 'нет'}" + warn)
