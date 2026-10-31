@@ -47,6 +47,22 @@ def bare_number(v):
     return v is not None and v.replace(".", "").isdigit()
 
 
+def unit_fits(v, typ):
+    """Подходит ли номинал по единицам к типу: пико/нано/микро — ёмкость (у дросселя — мкГн),
+    кило/мега/Ом — сопротивление. Голое число годится всем."""
+    if not v or typ is None:
+        return True
+    cap = bool(re.search(r"[pnμ]|F$", v))
+    res = bool(re.search(r"[kMΩ]", v))
+    if typ in ("R", "RT"):
+        return not cap
+    if typ == "C":
+        return not res
+    if typ == "L":
+        return not res and "F" not in v
+    return True
+
+
 def prefix(ref):
     m = re.match(r"[A-Z]+", ref or "")
     return m.group(0) if m else ""
@@ -136,6 +152,8 @@ def build(res, title="Автоматический разбор (без ИИ)", 
                 st = pt
             if st not in ("R", "C", "L", "RT", "Z", "F", None):
                 continue
+            if not unit_fits(t["value"], st):
+                continue                                     # «10n» у резистора, «2.7k» у конденсатора
             d = analyzer.box_dist(s["box"], *tc)
             if bare_number(t["value"]) and d > 0.35 * size(s["box"]):
                 continue                                     # «7», «10» в стороне — скорее номер вывода

@@ -59,6 +59,49 @@ SYMPTOMS = {
     "hum": "Пускатель гудит, дребезжит",
 }
 
+# Описание словами → симптомы (корни слов, чтобы ловить «не запускается», «не запустился», «не пускается»)
+SYMPTOM_WORDS = [
+    (r"не\s*(за)?пуска|не\s*(за)?пуст|не\s*старту|не\s*включает(ся)?\s*(двигат|мотор|пускат)|не\s*крутит", "no_start"),
+    (r"не\s*(вы)?ключа.*стоп|не\s*останавл|не\s*отключа", "no_stop"),
+    (r"пока\s*держ|не\s*держит|самоподхват|отпуска\w*\s*кнопк", "no_hold"),
+    (r"выбива|срабатыва\w*\s*(автомат|теплов)|отключа\w*\s*автомат|теплов\w*\s*реле", "trips"),
+    (r"гуд\w*\s*пускат|дребезж|пускатель\s*гуд|контактор\s*гуд", "hum"),
+    (r"не\s*включа|нет\s*признак|мёртв|мертв|нет\s*питан|не\s*горит\s*индикац", "no_power"),
+    (r"предохранит|сгорает\s*плавк", "fuse"),
+    (r"дым|гар[ьи]|нагар|запах", "smoke"),
+    (r"гре[её]тся|перегре|горяч", "overheat"),
+    (r"нет\s*выход|нет\s*напряжения\s*на\s*выход|нет\s*сигнала\s*на\s*выход", "no_output"),
+    (r"одн\w*\s*(фаз|канал|плеч)", "one_channel"),
+    (r"гул|писк|свист|пульсац", "noise"),
+    (r"сбо|глюч|перезапуска|перезагруж|нестабил", "unstable"),
+    (r"защит|ошибк|авари", "protection"),
+    (r"слаб|просед|не\s*тянет|мало\s*мощн", "weak"),
+    (r"после\s*прогрев|через\s*(некоторое\s*)?время|со\s*временем|прогре", "after_time"),
+    (r"4.?20|обрыв\s*датч|нет\s*сигнала|ток\s*петл", "no_signal"),
+    (r"неверн\w*\s*показ|зашкал|врёт|врет|не\s*те\s*показ", "wrong_reading"),
+    (r"скач|шумят|прыга", "noisy"),
+    (r"плыв|дрейф|уход\w*\s*показ", "drift"),
+    (r"контроллер\w*\s*(завис|не\s*старт)|мк\s*завис|зависа|сбрасыва", "mcu_hang"),
+    (r"нет\s*связи|rs.?485|modbus|uart|i2c|spi", "comm"),
+    (r"вразнос|разгоня|обороты\s*не\s*огранич|максимальн\w*\s*скорост", "overspeed"),
+    (r"скорость\s*плава|раскачива|дёрга|дерга|рывк", "speed_hunt"),
+    (r"энкодер|положени|пропуск\w*\s*импульс", "position_error"),
+    (r"завышен|напряжение\s*выше|выходное\s*плава", "out_high"),
+]
+
+
+def parse_symptoms(text):
+    """«Двигатель не запускается, пускатель гудит» → ['no_start', 'hum']."""
+    t = str(text or "").lower().replace("ё", "е")
+    out = []
+    for pat, key in SYMPTOM_WORDS:
+        if re.search(pat.replace("ё", "е"), t) and key not in out:
+            out.append(key)
+    if "no_start" in out and "no_power" in out and not re.search(r"не\s*включа\w*\s*(сам|вообще|прибор|блок|плат)", t):
+        out.remove("no_power")                       # «не включается двигатель» — это no_start
+    return out
+
+
 # Виды отказа по типу детали: (вид, базовый вес, симптомы, как проверить)
 MODES = {
     "M": [("пробой сток-исток", 1.0, {"fuse", "smoke", "no_power", "protection", "overheat"},
@@ -706,6 +749,8 @@ def diagnose(project, symptoms=()):
            "physics": phys["findings"], "node_voltages": phys["node_voltages"],
            "repairs_used": len(repairs),
            "voltages": {k: round(v, 1) for k, v in sorted(circ.volt.items(), key=lambda kv: -kv[1]) if v > 0}}
+    import checkplan                                    # где искать и что, чем, с каким результатом измерить
+    out["plan"] = checkplan.make(circ, phys, cands[:40], symptoms)
     (project / "diagnosis.json").write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
     (project / "diagnosis.md").write_text(to_markdown(out), encoding="utf-8")
     return out
@@ -722,6 +767,9 @@ def to_markdown(d):
     for i, c in enumerate(d["candidates"][:20], 1):
         md.append(f"| {i} | {c['ref']} {c['value']} [{c['cell']}] | {c['p'] * 100:.1f}% | {c['mode']} | "
                   f"{'; '.join(c['why']) or ', '.join(c['roles'])} | {c['check']} |")
+    if d.get("plan"):
+        import checkplan
+        md += ["", checkplan.to_markdown(d["plan"])]
     md += ["", f"_Учтено ремонтов из истории: {d['repairs_used']}. Вероятности — относительные оценки, "
                "не замена измерениям._", ""]
     import physics
@@ -743,5 +791,8 @@ if __name__ == "__main__":
         print("записано:", row)
     else:
         syms = a[1].split(",") if len(a) > 1 else []
+        if any(s not in SYMPTOMS for s in syms):          # описание словами: «не запускается двигатель»
+            syms = parse_symptoms(" ".join(a[1:]))
+            print("симптомы:", ", ".join(syms) or "не распознаны", file=sys.stderr)
         d = diagnose(a[0], syms)
         print(to_markdown(d))

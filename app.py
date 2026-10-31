@@ -165,6 +165,13 @@ class App(tk.Tk):
             v = tk.BooleanVar(value=False)
             self.sym_vars[key] = v
             ttk.Checkbutton(box, text=text, variable=v).grid(row=i // 2, column=i % 2, sticky="w")
+        drow = ttk.Frame(frame)
+        drow.pack(fill="x", pady=2)
+        ttk.Label(drow, text="Неисправность словами:").pack(side="left")
+        self.var_desc = tk.StringVar()
+        ent = ttk.Entry(drow, textvariable=self.var_desc)
+        ent.pack(side="left", fill="x", expand=True, padx=4)
+        ent.bind("<Return>", lambda e: self.run_diag())
         row = ttk.Frame(frame)
         row.pack(fill="x", pady=2)
         ttk.Button(row, text="Найти причины", command=self.run_diag).pack(side="left")
@@ -195,12 +202,15 @@ class App(tk.Tk):
         tv.pack(fill="both", expand=True)
         for lvl, color in (("высокий", "#c62828"), ("средний", "#b26a00"), ("низкий", "#555"), ("информация", "#555")):
             tv.tag_configure(lvl, foreground=color)
+        tv.tag_configure("stage", foreground="#1565c0")
         tv.bind("<<TreeviewSelect>>", self.on_diag)
         self.tv_diag = tv
 
     def run_diag(self):
         if not self.project or not self.netlist:
             return messagebox.showinfo("Диагностика", "Нужен netlist.json: сначала распознайте схему.")
+        for k in diagnose.parse_symptoms(self.var_desc.get()):   # «не запускается» → отметить симптом
+            self.sym_vars[k].set(True)
         syms = [k for k, v in self.sym_vars.items() if v.get()]
         try:
             self.diag = diagnose.diagnose(self.project, syms)
@@ -208,6 +218,17 @@ class App(tk.Tk):
             return messagebox.showerror("Диагностика", str(e))
         tv = self.tv_diag
         tv.delete(*tv.get_children())
+        plan = self.diag.get("plan") or {}
+        if plan.get("focus"):
+            tv.insert("", "end", iid="pf", tags=("stage",),
+                      values=("", "Где", "Вероятное место: " + ", ".join(
+                          f"{a['ref']} ({a['cell'] or '?'})" for a in plan["focus"][:5])))
+        stage = None
+        for i, st in enumerate(plan.get("steps", [])):
+            if st["stage"] != stage:
+                stage = st["stage"]
+                tv.insert("", "end", iid=f"ps{i}", tags=("stage",), values=("", "", f"▶ {stage}"))
+            tv.insert("", "end", iid=f"p{i}", values=(f"{i + 1}.", ", ".join(st["refs"][:3]), st["what"]))
         for i, r in enumerate(self.diag["risks"]):
             if r["level"] == "информация":
                 continue
@@ -292,6 +313,24 @@ class App(tk.Tk):
             if r.get("symptoms"):
                 parts_.append(("Ожидаемые симптомы: " + ", ".join(diagnose.SYMPTOMS.get(s, s) for s in r["symptoms"]) + "\n", None))
             self._set_detail(parts_)
+            return self._focus_cells()
+        if sel[0].startswith("p"):
+            plan = self.diag.get("plan") or {}
+            if sel[0] == "pf" or sel[0].startswith("ps"):
+                refs = [a["ref"] for a in plan.get("focus", [])]
+                parts = [("Где искать\n", "h")] + [(f"> {f}\n\n", None) for f in plan.get("first", [])]
+                parts += [(f"• {a['ref']} {a['value']} [{a['cell'] or '?'}] — {a['p'] * 100:.0f} %: "
+                           f"{', '.join(dict.fromkeys(a['modes']))}\n", None) for a in plan.get("focus", [])]
+            else:
+                st = plan["steps"][int(sel[0][1:])]
+                refs = st["refs"]
+                parts = [(f"{st['stage']}: {st['what']}\n", "h"),
+                         (f"Место: {st['cell'] or '—'}\n\n", None),
+                         (f"Норма / что ожидать:\n{st['expect']}\n\n", None)]
+                if st["why"]:
+                    parts.append((f"Почему: {st['why']}\n", None))
+            self.hl_refs, self.hl_cells = set(refs), self._cells_of(refs)
+            self._set_detail(parts)
             return self._focus_cells()
         kind, i = sel[0][0], int(sel[0][1:])
         if kind == "r":

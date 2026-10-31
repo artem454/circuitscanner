@@ -271,8 +271,8 @@ MULT = "pnuμmkKMR"
 def fix_ref(t):
     """'RI2' → 'R12', 'VTI' → 'VT1'. None, если на обозначение не похоже."""
     t = t.replace(" ", "").replace(".", "")
-    if not 2 <= len(t) <= 6:
-        return None
+    if not 2 <= len(t) <= 6 or not t[0].isalpha():
+        return None                                   # «277» — номинал, а не «Z77»
     up = t.upper()
     for p in REF_PREFIX:
         head = "".join(TO_LETTER.get(c, c) for c in up[:len(p)])

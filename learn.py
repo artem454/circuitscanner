@@ -412,6 +412,8 @@ def train_ocr(n=300):
         gray = core.imread(proj / "clean.png")[:, :, 0]
         cell = man["grid"]["cell"]
         refs = {c["ref"]: core.parse_cell(c.get("cell", "")) for c in nl["components"]}
+        vals = [(str(c.get("value", "")).split("/")[0].split(" ")[0], core.parse_cell(c.get("cell", "")))
+                for c in nl["components"] if c.get("value") and c.get("type") in ("R", "C", "L")]
         for t in an["texts"]:
             tb = t["box"]
             cc = (int((tb[0] + tb[2]) / 2 // cell), int((tb[1] + tb[3]) / 2 // cell))
@@ -421,6 +423,16 @@ def train_ocr(n=300):
                     for f, ch in ocrmod.learn_word(eng, gray, tb, t["vertical"], ref):
                         X.append(f.tolist())
                         y.append(ch)
+            # номинал: в той же клетке, число букв совпадает, цифры согласуются с прочитанным
+            raw = eng.word(gray, tb, t["vertical"])[0]
+            for v, pc in vals:
+                want = [ch for ch in v.replace("u", "μ") if ch not in " .,-"]
+                got = [ch for ch in raw if ch not in " .,-"]
+                if pc and abs(pc[0] - cc[0]) <= 1 and abs(pc[1] - cc[1]) <= 1 and len(want) == len(got)                         and want and want[0] == got[0]:
+                    for f, ch in ocrmod.learn_word(eng, gray, tb, t["vertical"], "".join(want)):
+                        X.append(f.tolist())
+                        y.append(ch)
+                    break
     total = ocrmod.save_extra(X, y)
     print(f"вырезано букв из схем: {len(y)}, всего в дообучении: {total}")
 
