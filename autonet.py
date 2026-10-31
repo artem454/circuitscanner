@@ -224,6 +224,8 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             typ = pt
         elif st and pt and st != pt and (st, pt) not in COMPAT:
             low = True
+        elif s.get("uncertain") and not pt:
+            low = True                                       # две модели разошлись, подписи нет
         if not ref:
             letter = {"R": "R", "C": "C", "L": "L", "D": "VD", "Z": "VD", "Q": "VT", "M": "VT", "U": "DA",
                       "MCU": "DD", "K": "K", "SW": "SA", "BTN": "SB", "LAMP": "HL", "F": "FU", "QF": "QF",

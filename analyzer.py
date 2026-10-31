@@ -673,13 +673,15 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
 
     two_lead_resistors(symbols, pins, W, H)
     texts_ok = try_ocr(gray, words) if ocr else False
-    feats = []
+    import symclass
+    feats, crops = [], []
     for k, sy in enumerate(symbols):
         sy["id"] = f"S{k + 1}"
         sy["near_text"] = sorted((k2 for k2, wd in enumerate(words)
                                   if box_dist(sy["box"], *box_center(wd["box"])) <= 8 * sw),
                                  key=lambda k2: box_dist(sy["box"], *box_center(words[k2]["box"])))[:3]
         feats.append(symbol_features(ink, sy["box"], sw))
+        crops.append(symclass.crop(ink, sy["box"], sw))
 
     def sc(v):
         return round(v / s, 1)
@@ -705,20 +707,31 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
             "labels": [f"T{k + 1}" for k in net["labels"]], "dangling": net["dangling"],
         })
     res["_features"] = feats                     # для обучения; в файл не пишется
+    res["_crops"] = crops                        # вырез 48×48 и размеры — для классификатора формы
     return res
+
+
+_MODEL = {}
 
 
 def classify(res, model=None):
     """Подписать типы символов обученным классификатором (если он есть)."""
-    model = model or SymbolModel()
+    import symclass
+    if "m" not in _MODEL:
+        _MODEL["m"] = SymbolModel()
+        _MODEL["second"] = symclass.Model() if symclass.MODEL.exists() else None
+    model = model or _MODEL["m"]
+    second = _MODEL["second"]
     if not model.ready():
         return False
-    for sy, f in zip(res["symbols"], res["_features"]):
+    for sy, f, (c, dims) in zip(res["symbols"], res["_features"], res["_crops"]):
         if sy["kind"] in ("R", "U"):
             continue
         lab, conf = model.predict(f)
         if lab != "OTHER":
             sy["kind"], sy["kind_conf"] = lab, float(conf)
+            if second is not None and second.predict(c, dims, trusted_only=False)[0] != lab:
+                sy["uncertain"] = True          # модель формы не согласна — тип под вопросом
     return True
 
 

@@ -393,22 +393,23 @@ def _examples(args):
     cls, idx, n, seed, params = args
     rng = random.Random(seed)
     draw = LIBRARY[cls][idx]
-    X, y = [], []
+    X, y, Cr = [], [], []
     for _ in range(n):
         img, body = render(draw, rng)
         res = analyzer.analyze_gray(img, params)
         bx = [(body[0] + body[2]) / 2, (body[1] + body[3]) / 2]
         best, bf = None, None
-        for sy, f in zip(res["symbols"], res["_features"]):
+        for sy, f, cr in zip(res["symbols"], res["_features"], res["_crops"]):
             b = sy["box"]
             inter = max(0, min(b[2], body[2]) - max(b[0], body[0])) * max(0, min(b[3], body[3]) - max(b[1], body[1]))
             area = max(1, (body[2] - body[0]) * (body[3] - body[1]))
             if inter / area > 0.35 and (best is None or inter > best):
-                best, bf = inter, f
+                best, bf = inter, (f, cr)
         if bf is not None:
-            X.append(bf)
+            X.append(bf[0])
             y.append(cls)
-    return X, y
+            Cr.append(bf[1])
+    return X, y, Cr
 
 
 def build(per_symbol=40, params=None):
@@ -420,12 +421,15 @@ def build(per_symbol=40, params=None):
     params = params or analyzer.load_params()
     jobs = [(cls, i, per_symbol, 7000 + 97 * k + i, params)
             for k, (cls, fs) in enumerate(LIBRARY.items()) for i in range(len(fs))]
-    X, y = [], []
+    import symclass
+    X, y, Cr = [], [], []
     with ProcessPoolExecutor(max(1, (os.cpu_count() or 2) - 1)) as pool:
-        for Xi, yi in pool.map(_examples, jobs):
+        for Xi, yi, ci in pool.map(_examples, jobs):
             X += Xi
             y += yi
+            Cr += ci
     total = learn.save_examples(X, y, "ref")
+    symclass.save([c for c, _ in Cr], [d for _, d in Cr], y, "ref")
     stats = {k: int(v) for k, v in zip(*np.unique(y, return_counts=True))}
     print(f"эталонов: {len(y)} {stats}; всего примеров {total}")
     return stats

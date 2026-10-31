@@ -327,8 +327,8 @@ def _symbols_one(args):
     img, truth = synth.generate(seed)
     gray, truth = prep(img, truth)
     res = analyzer.analyze_gray(gray, params)
-    X, y = [], []
-    for sy, f in zip(res["symbols"], res["_features"]):
+    X, y, Cr = [], [], []
+    for sy, f, cr in zip(res["symbols"], res["_features"], res["_crops"]):
         b = sy["box"]
         cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
         lab = "OTHER"
@@ -341,7 +341,8 @@ def _symbols_one(args):
                     best, lab = d, c["type"]
         X.append(f)
         y.append(lab)
-    return X, y
+        Cr.append(cr)
+    return X, y, Cr
 
 
 def save_examples(X, y, src):
@@ -441,17 +442,20 @@ def train_ocr(n=300):
 def train_symbols(n=80):
     params = analyzer.load_params()
     workers = max(1, (os.cpu_count() or 2) - 1)
-    X, y = [], []
+    import symclass
+    X, y, Cr = [], [], []
     with ProcessPoolExecutor(workers) as pool:
-        for Xi, yi in pool.map(_symbols_one, [(9000 + i, params) for i in range(n)]):
+        for Xi, yi, ci in pool.map(_symbols_one, [(9000 + i, params) for i in range(n)]):
             X += Xi
             y += yi
+            Cr += ci
     total = save_examples(X, y, "synth")
+    symclass.save([c for c, _ in Cr], [d for _, d in Cr], y, "synth")
     # проверка на отложенных схемах
     model = analyzer.SymbolModel()
     ok = cnt = 0
     for seed in range(20000, 20010):
-        Xi, yi = _symbols_one((seed, params))
+        Xi, yi, _ = _symbols_one((seed, params))
         for f, lab in zip(Xi, yi):
             cnt += 1
             ok += model.predict(np.asarray(f))[0] == lab
@@ -460,7 +464,7 @@ def train_symbols(n=80):
 
 
 TYPE_MAP = {"R": "R", "RV": "R", "C": "C", "L": "L", "D": "D", "Z": "D", "Q": "Q", "M": "Q",
-            "IGBT": "Q", "VS": "D", "U": "U", "OC": "U", "BR": "U", "J": "PORT", "K": "COIL", "T": "L", "X": "OTHER",
+            "IGBT": "Q", "VS": "VS", "U": "U", "OC": "OC", "BR": "U", "J": "PORT", "K": "COIL", "T": "L", "X": "OTHER",
             "SENSOR": "SENSOR", "RT": "RT", "TC": "TC", "XTAL": "XTAL", "LED": "LED", "MCU": "MCU", "TERM": "TERM",
             "ENC": "ENC", "TACHO": "TACHO", "HALL": "HALL",
             "SW": "SW_NO", "BTN": "BTN", "LAMP": "LAMP", "MOTOR": "MOTOR", "QF": "QF", "F": "FU"}
@@ -495,12 +499,12 @@ def real_examples(project, res=None):
         if cls not in RECT_CLASSES and xy:
             comps.setdefault(xy, []).append(cls)
     cand = []
-    for sy, f in zip(res["symbols"], res["_features"]):
+    for sy, f, cr in zip(res["symbols"], res["_features"], res["_crops"]):
         if sy["kind"] in ("R", "U") or sy.get("kind") in ("GND", "PORT"):
             continue
         x0, y0, x1, y1 = sy["box"]
         span = {(int(x // cell), int(y // cell)) for x in (x0, x1) for y in (y0, y1)}
-        cand.append((span, f))
+        cand.append((span, (f, cr)))
     X, y = [], []
     per_cell = {}
     for span, f in cand:
@@ -514,7 +518,7 @@ def real_examples(project, res=None):
         if len(fs) == 1 and len(comps.get(xy, [])) == 1:
             X.append(fs[0])
             y.append(comps[xy][0])
-    return X, y
+    return [f for f, _ in X], y, [c for _, c in X]
 
 
 def add_project(project):
@@ -523,11 +527,13 @@ def add_project(project):
     if not core.load_json(project / "netlist.json"):
         raise SystemExit("в проекте нет netlist.json")
     register(project)
-    X, y = real_examples(project)
+    X, y, Cr = real_examples(project)
     if not X:
         print("не нашлось символов, которые можно однозначно разметить")
         return
     total = save_examples(X, y, "real:" + project.name)
+    import symclass
+    symclass.save([c for c, _ in Cr], [d for _, d in Cr], y, "real:" + project.name)
     stats = {k: int(v) for k, v in zip(*np.unique(y, return_counts=True))}
     print(f"{project.name}: {len(X)} примеров {stats}; всего {total}")
 
