@@ -253,6 +253,10 @@ ROLE_BOOST = {
     "seal_in": {"*": 1.3, "no_hold": 3.0},
     "coil": {"*": 1.4, "no_start": 1.8, "hum": 2.2, "trips": 1.3, "no_stop": 1.8},
     "overload": {"*": 1.3, "trips": 2.2, "no_start": 1.5},
+    "opamp": {"*": 1.1, "wrong_reading": 1.6, "noisy": 1.5, "out_high": 1.5, "no_output": 1.3, "drift": 1.3},
+    "comparator": {"*": 1.1, "unstable": 1.8, "noisy": 1.6, "protection": 1.6, "no_output": 1.3},
+    "schmitt": {"*": 1.1, "unstable": 1.5, "no_output": 1.4, "noisy": 1.3},
+    "decoder": {"*": 1.1, "one_channel": 2.2, "no_output": 1.6},
 }
 
 ROLE_RU = {
@@ -268,6 +272,8 @@ ROLE_RU = {
     "feedback": "обратная связь по напряжению",
     "start_chain": "цепь пуска", "stop_chain": "цепь останова (размыкающие контакты)",
     "seal_in": "самоподхват", "coil": "катушка пускателя/реле", "overload": "защита (тепловое реле, автомат)",
+    "opamp": "операционный усилитель", "comparator": "компаратор", "schmitt": "триггер Шмитта",
+    "decoder": "дешифратор/шифратор",
 }
 
 
@@ -426,6 +432,13 @@ class Circuit:
                 self.comps.get(r, {}).get("type") in ("M", "IGBT") and self.pins(r).get("G") in nets
                 for n in nets for r in self.neighbors(n)):
             roles.append("gate_resistor")
+        if t in ("U", "DA", "DD"):
+            import parts
+            kind = (parts.lookup(c.get("value", ""))[1] or {}).get("kind")
+            role = {"OPAMP": "opamp", "COMP": "comparator", "SCHMITT": "schmitt", "DECODER": "decoder",
+                    "ENCODER": "decoder"}.get(kind)
+            if role:
+                roles.append(role)
         roles += self._kip_roles(ref, t, val, nets)
         roles += self._ctrl_roles(ref, t, nets, text)
         if not roles:

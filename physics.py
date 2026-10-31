@@ -557,7 +557,8 @@ class Physics:
                 if not rf:
                     continue
                 Rf, _ = dg.parse_value(c.comps[rf[0]].get("value"))
-                rin = [r for r in c.neighbors(nin) if c.comps[r].get("type") == "R" and r not in rf]
+                rin = [r for r in c.neighbors(nin) if c.comps[r].get("type") == "R" and r not in rf
+                       and not any(m.upper() in core.GROUND_NAMES for m in c.pins(r).values())]  # на общий — неинвертирующий (analog.py)
                 if not rin or not Rf:
                     continue
                 Ri, _ = dg.parse_value(c.comps[rin[0]].get("value"))
@@ -1321,6 +1322,8 @@ class Physics:
         self.transformer_supply()
         self.gate_drive()
         self.opamp_stages()
+        import analog                              # ОУ, компараторы, триггеры Шмитта, дешифраторы
+        analog.Analog(self).run()
         self.oscillators()
         self.hf_checks()
         self.loop_4_20()
