@@ -474,8 +474,10 @@ class App(tk.Tk):
         def terminal(cli):
             exe = shutil.which(cli)
             if not exe:
-                return res.set(f"{cli} не найден в PATH. Claude Code: приложение Claude (вкладка Code) или "
-                               "«npm i -g @anthropic-ai/claude-code»; Codex: «npm i -g @openai/codex».")
+                return res.set(f"Команды «{cli}» для терминала нет. Если вы работаете в Claude Code внутри приложения "
+                               "Claude — она не нужна: нажмите «Подключить к Claude Code» и откройте сессию в папке "
+                               "программы или проекта. Отдельная команда для терминала ставится так: Claude Code — "
+                               "«npm i -g @anthropic-ai/claude-code», Codex — «npm i -g @openai/codex».")
             cwd = str(self.project or Path(__file__).resolve().parent)
             subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cli], cwd=cwd)
             res.set(f"{cli} открыт в {cwd}")
