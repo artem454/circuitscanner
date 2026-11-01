@@ -33,7 +33,7 @@ LEVEL_COLOR = {"error": "#c62828", "warn": "#b26a00", "question": "#6a1b9a", "in
 class App(tk.Tk):
     def __init__(self, project=None):
         super().__init__()
-        self.title("Schematic Helper — схема → netlist")
+        self.title("Сканер электросхем — схема → netlist")
         self.geometry("1500x900")
         self.minsize(1000, 600)
 
@@ -124,7 +124,7 @@ class App(tk.Tk):
         pan.add(right, weight=1)
         self.tabs = ttk.Notebook(right)
         self.tabs.pack(fill="both", expand=True)
-        self.tv_comp = self._tree(self.tabs, "Компоненты", [("ref", "Обозн.", 70), ("type", "Тип", 50),
+        self.tv_comp = self._tree(self.tabs, "Компоненты", [("ref", "Обозн.", 70), ("type", "Тип", 72),
                                                             ("value", "Номинал", 120), ("cell", "Клетка", 55)])
         crow = ttk.Frame(self.tv_comp.master)
         crow.pack(side="top", fill="x", before=self.tv_comp)
@@ -133,6 +133,9 @@ class App(tk.Tk):
         ttk.Checkbutton(crow, text="только сомнения", variable=self.var_only_low,
                         command=self._fill_lists).pack(side="left", padx=6)
         self.tv_comp.bind("<Double-1>", lambda e: self.edit_comp())
+        self.tv_comp.bind("<Motion>", self._comp_tip)
+        self.tv_comp.bind("<Leave>", lambda e: self._hide_tip())
+        self._tip = None
         self.tv_net = self._tree(self.tabs, "Цепи", [("net", "Цепь", 130), ("n", "Выв.", 40),
                                                      ("label", "Метка", 120)])
         self.tv_issue = self._tree(self.tabs, "Проверка", [("lvl", "Уровень", 75), ("where", "Где", 70),
@@ -620,7 +623,7 @@ class App(tk.Tk):
         self.nl_mtime = None
         self.load_netlist()
         self.load_notes()
-        self.title(f"Schematic Helper — {path.name}")
+        self.title(f"Сканер электросхем — {path.name}")
         g = manifest["grid"]
         self.status.set(f"Проект {path}  |  сетка {g['cols']}×{g['rows']}, фрагментов: "
                         f"{len(manifest['tiles'])}  |  netlist: "
@@ -687,7 +690,7 @@ class App(tk.Tk):
         for ref, c in sorted(self.comps.items(), key=lambda kv: _natural(kv[0])):
             if getattr(self, "var_only_low", None) and self.var_only_low.get() and c.get("confidence") != "low":
                 continue
-            self.tv_comp.insert("", "end", iid=ref, values=(ref, c.get("type", ""), c.get("value", ""),
+            self.tv_comp.insert("", "end", iid=ref, values=(ref, core.type_label(c.get("type", "")), c.get("value", ""),
                                                            c.get("cell", "")),
                                 tags=("low",) if c.get("confidence") == "low" else ())
         meta = self.netlist.get("nets", {})
@@ -939,7 +942,7 @@ class App(tk.Tk):
 
     def _comp_text(self, ref):
         c = self.comps.get(ref, {})
-        parts = [(f"{ref}  {c.get('type', '')} {core.TYPES.get(c.get('type', ''), '')}  "
+        parts = [(f"{ref}  {core.type_label(c.get('type', ''))} — {core.type_name(c.get('type', ''))}  "
                   f"{c.get('value', '')}  [{c.get('cell', '')}]\n", "h")]
         for pin, net in (c.get("pins") or {}).items():
             others = [f"{r}.{p}" for r, p in self.nets.get(net, []) if r != ref]
@@ -959,6 +962,35 @@ class App(tk.Tk):
         self.hl_cells = self._cells_of([ref])
         self._set_detail(self._comp_text(ref))
         self._focus_cells()
+
+    def _comp_tip(self, e):
+        """Подсказка при наведении на деталь в списке: что это за деталь."""
+        row = self.tv_comp.identify_row(e.y)
+        c = self.comps.get(row) if row else None
+        if not c:
+            return self._hide_tip()
+        t = c.get("type", "")
+        lines = [f"{row} — {core.type_name(t)} ({core.type_label(t)}, по ГОСТ {core.type_gost(t) or '—'})"]
+        if c.get("value"):
+            lines.append(f"номинал: {c['value']}")
+        if c.get("confidence") == "low":
+            lines.append("распознано неуверенно — двойной щелчок, чтобы исправить")
+        elif c.get("checked"):
+            lines.append("проверено вами")
+        text = "\n".join(lines)
+        if self._tip is None:
+            self._tip = tk.Toplevel(self)
+            self._tip.wm_overrideredirect(True)
+            self._tip_lbl = tk.Label(self._tip, justify="left", background="#ffffe0", relief="solid",
+                                     borderwidth=1, font=("Segoe UI", 9), padx=6, pady=3)
+            self._tip_lbl.pack()
+        self._tip_lbl.config(text=text)
+        self._tip.wm_geometry(f"+{e.x_root + 16}+{e.y_root + 12}")
+
+    def _hide_tip(self):
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
 
     def edit_comp(self, ref=None):
         """Правка сомнительной детали: обозначение, тип, номинал — и сразу дообучение ядра."""
@@ -997,21 +1029,27 @@ class App(tk.Tk):
         form = ttk.Frame(win, padding=8)
         form.pack(fill="x")
         v_ref = tk.StringVar(value="" if "?" in ref else ref)
-        v_type = tk.StringVar(value=c.get("type", "X"))
+        choices = {f"{core.type_label(t)} — {core.type_name(t)} [{core.type_gost(t)}]": t for t in core.TYPE_RU}
+        choices.update({teach.GND_CHOICE: "GND", teach.PWR_CHOICE: "PWR", teach.NOT_PART_CHOICE: teach.NOT_PART})
+        by_code = {v: k for k, v in choices.items()}
+        v_type = tk.StringVar(value=by_code.get(c.get("type", "X"), c.get("type", "X")))
         v_val = tk.StringVar(value=c.get("value", ""))
-        types = list(core.TYPES) + [teach.NOT_PART]
+        types = list(choices)
         for row, (lab, w) in enumerate((("Обозначение (как на схеме)", ttk.Entry(form, textvariable=v_ref, width=18)),
-                                        ("Тип", ttk.Combobox(form, textvariable=v_type, values=types, width=16)),
+                                        ("Тип", ttk.Combobox(form, textvariable=v_type, values=types, width=50,
+                                                             state="readonly")),
                                         ("Номинал", ttk.Entry(form, textvariable=v_val, width=18)))):
             ttk.Label(form, text=lab).grid(row=row, column=0, sticky="w", pady=2)
             w.grid(row=row, column=1, sticky="w", padx=6)
-        ttk.Label(form, text="«НЕ ДЕТАЛЬ» — обрывок надписи, стрелка, рамка: удаляется и ядро учится их пропускать",
+        ttk.Label(form, text="«Земля» — символ земли/корпуса: его цепь становится GND. «Питание» — стрелка или "
+                             "метка питания: напряжение впишите в «Номинал» (+12V). «НЕ ДЕТАЛЬ» — обрывок "
+                             "надписи, рамка: удаляется. Ядро запоминает каждый выбор",
                   foreground="#777", wraplength=330).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
         hint = {t: d for t, d in core.TYPES.items()}
 
         def save(next_=True):
-            new_type = v_type.get().strip()
-            if new_type not in types:
+            new_type = choices.get(v_type.get().strip())
+            if new_type is None:
                 return messagebox.showwarning("Тип", "Выберите тип из списка", parent=win)
             new_ref = v_ref.get().strip() or ref
             try:
@@ -1023,7 +1061,9 @@ class App(tk.Tk):
             report = teach.teach(self.project, c, new_type, new_ref, ref)
             win.destroy()
             self.load_netlist()
-            what = "удалена как «не деталь»" if edited is None else f"{edited['ref']} — {hint.get(new_type, new_type)}"
+            what = {"GND": "символ земли — цепь стала GND", "PWR": "метка питания — цепь подписана",
+                    teach.NOT_PART: "удалена как «не деталь»"}.get(new_type) or \
+                f"{edited['ref']} — {core.type_name(new_type)} ({core.type_label(new_type)})"
             self.status.set(f"{ref}: {what}. Ядро: {report}. Модель формы переобучается в фоне.")
             if next_:                                       # сразу следующая сомнительная
                 rest = [r for r, cc in sorted(self.comps.items(), key=lambda kv: _natural(kv[0]))

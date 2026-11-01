@@ -341,6 +341,70 @@ def ground(s, x, y, rng):
     return [(x, y - 4)]
 
 
+def ground_bar(s, x, y, rng):
+    """Общий провод по ГОСТ 2.721: одна толстая черта."""
+    s.line((x, y - 4), (x, y))
+    s.line((x - 3, y), (x + 3, y), 2.2)
+    return [(x, y - 4)]
+
+
+def ground_chassis(s, x, y, rng):
+    """Корпус: черта с наклонными штрихами вниз."""
+    s.line((x, y - 4), (x, y))
+    s.line((x - 3, y), (x + 3, y))
+    for dx in (-3, -1, 1, 3):
+        s.line((x + dx, y), (x + dx - 1.2, y + 1.6))
+    return [(x, y - 4)]
+
+
+def ground_signal(s, x, y, rng):
+    """Сигнальная земля (IEC/ANSI): треугольник вершиной вниз."""
+    s.line((x, y - 4), (x, y))
+    s.poly([(x - 2.5, y), (x + 2.5, y), (x, y + 2.5)], fill=rng.random() < 0.4)
+    return [(x, y - 4)]
+
+
+def ground_earth(s, x, y, rng):
+    """Защитное заземление: знак земли в окружности."""
+    ends = ground(s, x, y, rng)
+    s.circle((x, y + 1.2), 3.6)
+    return ends
+
+
+def power_arrow(s, x, y, rng):
+    """Подключение к питанию: стрелка вверх (залитая или контурная) или поперечная черта."""
+    s.line((x, y + 5), (x, y - 1))
+    k = rng.random()
+    if k < 0.45:
+        s.poly([(x - 1.5, y - 1), (x + 1.5, y - 1), (x, y - 3.5)], fill=True)
+    elif k < 0.75:
+        s.poly([(x - 1.5, y - 1), (x + 1.5, y - 1), (x, y - 3.5)])
+    else:
+        s.line((x - 2.5, y - 1), (x + 2.5, y - 1), 1.4)
+    if rng.random() < 0.6:
+        s.text(rng.choice(["+5V", "+12V", "+24V", "VCC", "+15", "-12V"]), x + 1.5, y - 3, 2.4)
+    return [(x, y + 5)]
+
+
+def terminal_circle(s, x, y, rng):
+    """Вывод схемы, контакт для подключения: кружок на конце провода."""
+    s.circle((x, y), 1.2, fill=rng.random() < 0.3)
+    if rng.random() < 0.5:
+        s.text(rng.choice(["A", "B", "C", "N", "X1", "1", "~"]), x + 2, y - 1.5, 2.4)
+    return [(x - 1.2, y)]
+
+
+def battery(s, x, y, rng):
+    """Батарея / элемент: длинная тонкая и короткая толстая пластины, иногда несколько пар."""
+    n = rng.choice((1, 1, 2))
+    x0 = x - (n - 1) * 2
+    for i in range(n):
+        xi = x0 + i * 4
+        s.line((xi - 0.8, y - 4), (xi - 0.8, y + 4))
+        s.line((xi + 0.8, y - 2), (xi + 0.8, y + 2), 2.2)
+    return [(x0 - 0.8, y), (x0 + (n - 1) * 4 + 0.8, y)]
+
+
 # класс классификатора ← эталоны
 LIBRARY = {
     "R": [resistor, potentiometer, varistor], "RT": [thermistor], "C": [capacitor, electrolytic],
@@ -348,7 +412,9 @@ LIBRARY = {
     "OC": [optocoupler], "SW_NO": [contact_no, contact_co, timer_contact], "SW_NC": [contact_nc],
     "THERMAL": [thermal_contact, thermal_heater], "BTN": [button_no, button_nc], "COIL": [relay_coil],
     "FU": [fuse], "QF": [breaker], "LAMP": [lamp], "MOTOR": [motor], "XTAL": [crystal],
-    "OPAMP": [opamp], "LOGIC": [logic_gate, ansi_and], "GND": [ground],
+    "OPAMP": [opamp], "LOGIC": [logic_gate, ansi_and],
+    "GND": [ground, ground_bar, ground_chassis, ground_signal, ground_earth], "PORT": [power_arrow, terminal_circle],
+    "GB": [battery],
 }
 
 

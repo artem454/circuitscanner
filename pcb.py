@@ -34,7 +34,7 @@ import parts
 MIL = 2.54
 G = 0.635                                   # шаг сетки трассировки, мм
 VIA_D, VIA_DRILL = 1.2, 0.6
-OFFBOARD = {"MOTOR", "LAMP", "BTN", "QF", "SENSOR", "ENC", "TACHO", "HALL", "TC", "SW"}
+OFFBOARD = {"MOTOR", "LAMP", "BTN", "QF", "SENSOR", "ENC", "TACHO", "HALL", "TC", "SW", "METER", "YA", "EK", "WA", "BM"}
 PANEL_WORDS = re.compile(r"пускател|контактор|LC1|КМИ|ПМЛ|ПМА|КМ\d|тепл|LRD|РТИ|РТЛ|автомат|380|~\s*2[23]0|230\s*V\s*AC|AC\s*230", re.I)
 
 

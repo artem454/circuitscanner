@@ -129,7 +129,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             d = analyzer.box_dist(s["box"], *tc)
             if d > 2.5 * size(s["box"]):
                 continue
-            st = KIND2TYPE.get(s["kind"])
+            st = KIND2TYPE.get(s["kind"]) or (s["kind"] if s["kind"] in core.TYPES else None)
             cost = d / size(s["box"])
             if st and pt and st != pt and (st, pt) not in COMPAT and st not in GENERIC:
                 cost += 1.5                                  # тип не сходится — можно, но хуже
@@ -147,7 +147,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             continue
         tc = _center(t["box"])
         for sid, s in syms.items():
-            st = KIND2TYPE.get(s["kind"])
+            st = KIND2TYPE.get(s["kind"]) or (s["kind"] if s["kind"] in core.TYPES else None)
             pt = PREFIX2TYPE.get(prefix(ref_of.get(sid, "")))
             if st in GENERIC or not st:
                 st = pt
@@ -218,7 +218,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
         if len(pins) < 2 and not ref_of.get(sid) and (KIND2TYPE.get(s["kind"]) in GENERIC or s.get("uncertain")):
             junk += 1                                        # один вывод, нет обозначения, тип не опознан — обрывок
             continue
-        st = KIND2TYPE.get(s["kind"])
+        st = KIND2TYPE.get(s["kind"]) or (s["kind"] if s["kind"] in core.TYPES else None)
         ref = ref_of.get(sid)
         pt = PREFIX2TYPE.get(prefix(ref)) if ref else None
         typ = st or pt or "X"

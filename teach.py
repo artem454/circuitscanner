@@ -19,6 +19,10 @@ import ocr as ocrmod
 import symclass
 
 NOT_PART = "НЕ ДЕТАЛЬ"
+NOT_PART_CHOICE = "НЕ ДЕТАЛЬ — обрывок надписи, рамка, мусор"
+GND_CHOICE = "Земля/GND — символ земли, корпуса, заземления"
+PWR_CHOICE = "Пит/PWR — стрелка или метка питания (+12V и т. п.)"
+CLASS_OF = {"GND": "GND", "PWR": "PORT"}
 _retrain = {"thread": None, "again": False}
 
 
@@ -38,14 +42,14 @@ def teach(project, comp, new_type, new_ref=None, old_ref=None):
         return "у детали нет координат символа (netlist не из «Netlist без ИИ») — запомнено только в netlist"
     project = Path(project)
     gray, ink, sw, res = _ink_and_stroke(project)
-    cls = "OTHER" if new_type == NOT_PART else learn.TYPE_MAP.get(new_type, "OTHER")
+    cls = CLASS_OF.get(new_type) or ("OTHER" if new_type == NOT_PART else learn.TYPE_MAP.get(new_type, new_type))
     src = f"user:{project.name}:{old_ref or comp.get('ref')}"
     crop, dims = symclass.crop(ink, box, sw)
     symclass.save([crop], [dims], [cls], src)
     learn.save_examples([analyzer.symbol_features(ink, box, sw)], [cls], src)
     analyzer._MODEL.clear()                                  # kNN перечитает примеры при следующем разборе
     done = [f"символ запомнен как «{cls}»"]
-    if new_ref and new_ref != old_ref and new_type != NOT_PART:
+    if new_ref and new_ref != old_ref and new_type not in (NOT_PART, "GND", "PWR"):
         got = learn_ref_glyphs(gray, res, box, new_ref)
         if got:
             done.append(f"буквы обозначения «{new_ref}» — в чтение надписей ({got})")
@@ -97,6 +101,20 @@ def apply_edit(nl, ref, new_ref, new_type, new_value):
         raise KeyError(ref)
     if new_type == NOT_PART:
         comps.remove(c)
+        return None
+    if new_type in ("GND", "PWR"):                          # символ земли / метка питания — свойство цепи, не деталь
+        comps.remove(c)
+        nets = set((c.get("pins") or {}).values())
+        meta = nl.setdefault("nets", {})
+        if new_type == "GND":
+            for x in comps:
+                x["pins"] = {p: ("GND" if n in nets else n) for p, n in (x.get("pins") or {}).items()}
+            for n in nets:
+                meta.pop(n, None)
+            meta.setdefault("GND", {"label": "GND"})
+        else:
+            for n in nets:
+                meta.setdefault(n, {}).update({"port": True, "label": new_value or meta.get(n, {}).get("label") or "питание"})
         return None
     if new_ref and new_ref != ref and any(x.get("ref") == new_ref for x in comps):
         raise ValueError(f"обозначение {new_ref} уже есть в netlist")
