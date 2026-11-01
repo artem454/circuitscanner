@@ -245,7 +245,11 @@ def pad_positions(p, x, y, rot):
     return out
 
 
-def body_box(p, x, y, rot, margin=1.27):
+GAP = [1.27]                                # зазор вокруг корпусов (растёт при пересчёте)
+
+
+def body_box(p, x, y, rot, margin=None):
+    margin = GAP[0] if margin is None else margin
     w, h = p["fp"]["w"], p["fp"]["h"]
     xs = [pd["x"] for pd in p["fp"]["pads"]] + [-w / 2, w / 2]
     ys = [pd["y"] for pd in p["fp"]["pads"]] + [-h / 2, h / 2]
@@ -338,6 +342,7 @@ def _try_place(P, W, H):
                     acc.setdefault(n, []).append((px, py))
         return acc
 
+    wts = affinity_weights(P, big)                       # опыт идеальных плат: кто рядом с кем
     # порядок связей: следующей ставится деталь с наибольшим числом связей с уже поставленными
     placed_nets = {n for q in pos for n in links[q]}
     order = []
@@ -348,7 +353,7 @@ def _try_place(P, W, H):
         left.discard(r)
         placed_nets |= links[r]
     for r in order:
-        best = _best_spot(P, r, W, H, boxes, nets_pins, big)
+        best = _best_spot(P, r, W, H, boxes, nets_pins, big, wts.get(r))
         if best is None:
             return None
         _, x, y, rot = best
@@ -365,7 +370,7 @@ def _try_place(P, W, H):
             others = [body_box(P[q], *pos[q]) for q in pos if q != r]
             np_ = pins_of(exclude=r)
             cur = _spot_cost(P, r, *pos[r], np_, W, H)
-            best = _best_spot(P, r, W, H, others, np_, big)
+            best = _best_spot(P, r, W, H, others, np_, big, wts.get(r))
             if best and best[0] < cur - 1.0:
                 pos[r] = (round(best[1] / G) * G, round(best[2] / G) * G, best[3])
                 moved += 1
@@ -383,7 +388,7 @@ def _spot_cost(P, r, x, y, rot, nets_pins, W, H):
     return cost
 
 
-def _best_spot(P, r, W, H, boxes, nets_pins, big=()):
+def _best_spot(P, r, W, H, boxes, nets_pins, big=(), wts=None):
     """Лучшее свободное место детали r: сумма расстояний её выводов до выводов тех же цепей."""
     best = None
     for rot in (0, 90):
@@ -408,7 +413,8 @@ def _best_spot(P, r, W, H, boxes, nets_pins, big=()):
             pts = nets_pins.get(net) if net not in big else None
             if pts:
                 Q = np.array(pts)
-                cost = cost + (np.abs(X[:, None] + px - Q[None, :, 0]) + np.abs(Y[:, None] + py - Q[None, :, 1])).min(1)
+                k = (wts or {}).get(net, 1.0)
+                cost = cost + k * (np.abs(X[:, None] + px - Q[None, :, 0]) + np.abs(Y[:, None] + py - Q[None, :, 1])).min(1)
         k = int(np.argmin(cost))
         if best is None or cost[k] < best[0]:
             best = (float(cost[k]), float(X[k]), float(Y[k]), rot)
@@ -566,8 +572,10 @@ class Router:
         return None
 
 
-def route_board(P, pos, W, H, classes, attempts=3, progress=None):
-    """Развести все цепи. Возвращает (площадки, дорожки, переходные, неразведённые связи)."""
+def route_board(P, pos, W, H, classes, attempts=3, progress=None, ripup_rounds=2, order_mode="wide"):
+    """Развести все цепи. Возвращает (площадки, дорожки, переходные, неразведённые связи).
+    После обычных попыток — переразводка: для застрявшей связи находятся мешающие цепи, снимаются,
+    застрявшая проводится первой, снятые — заново; принимается, только если неразведённых стало меньше."""
     pads = []
     for r, p in P.items():
         for pd, x, y in pad_positions(p, *pos[r]):
@@ -585,56 +593,116 @@ def route_board(P, pos, W, H, classes, attempts=3, progress=None):
         ys = [pads[i]["y"] for i in nets[n]]
         return max(xs) - min(xs) + max(ys) - min(ys)
 
-    order = sorted(names, key=lambda n: (-classes.get(n, dflt)[0], hpwl(n)))
-    best = None
-    for attempt in range(attempts):
+    def fresh(keep=None, skip=()):
+        """Сетка с площадками и (если заданы) уже проложенными путями других цепей."""
         R = Router(W, H)
-        for pd in pads:                                      # площадки — на обоих слоях
+        for pd in pads:
             clear = classes.get(pd["net"], dflt)[1] if pd["net"] else 0.4
             R.mark([(None, *R.cell(pd["x"], pd["y"]))], nid.get(pd["net"], -3), pd["pad"]["d"] / 2, clear)
-        tracks, vias, failed = [], [], []
+        for n, ps in (keep or {}).items():
+            if n in skip:
+                continue
+            width, clear, _ = classes.get(n, dflt)
+            for path in ps:
+                R.mark(path, nid[n], width / 2, clear)
+        return R
+
+    def route_net(R, n):
+        """Дерево цепи: от первой площадки к ближайшей ещё не подключённой. → (пути, неразведённые)."""
+        width, clear, _ = classes.get(n, dflt)
+        rad = max(0, int(math.ceil((width / 2 + clear) / G)) - 1)
+        idx = sorted(nets[n], key=lambda i: (pads[i]["x"], pads[i]["y"]))
+        tree = {(l, *R.cell(pads[idx[0]]["x"], pads[idx[0]]["y"])) for l in (0, 1)}
+        left, paths, fails = idx[1:], [], []
+        while left:
+            left.sort(key=lambda i: min(abs(pads[i]["x"] - c[2] * G) + abs(pads[i]["y"] - c[1] * G) for c in tree))
+            i = left.pop(0)
+            cy, cx = R.cell(pads[i]["x"], pads[i]["y"])
+            ys = [c[1] for c in tree] + [cy]
+            xs = [c[2] for c in tree] + [cx]
+            m = 40
+            box = (max(0, min(ys) - m), min(R.ny - 1, max(ys) + m), max(0, min(xs) - m), min(R.nx - 1, max(xs) + m))
+            path = R.route(nid[n], list(tree), [(0, cy, cx), (1, cy, cx)], rad, box)
+            if path is None:                             # в окне не прошла — обход по всей плате
+                path = R.route(nid[n], list(tree), [(0, cy, cx), (1, cy, cx)], rad,
+                               (0, R.ny - 1, 0, R.nx - 1), limit=700000)
+            if path is None:
+                fails.append((n, pads[i]["ref"], pads[i]["pad"]["name"]))
+                continue
+            R.mark(path, nid[n], width / 2, clear)
+            paths.append(path)
+            tree |= set(path)
+        return paths, fails
+
+    multi = [n for n in names if len(nets[n]) > 1]
+    if order_mode == "short":                            # сначала короткие связи, широкие — потом
+        order = sorted(multi, key=lambda n: (hpwl(n), -classes.get(n, dflt)[0]))
+    else:                                                # сначала широкие (силовые), внутри — короткие
+        order = sorted(multi, key=lambda n: (-classes.get(n, dflt)[0], hpwl(n)))
+    best = None
+    for attempt in range(attempts):
+        R = fresh()
+        paths, failed = {}, []
         for k, n in enumerate(order):
             if progress and k % 10 == 0:
                 progress(f"трассировка: попытка {attempt + 1}, цепь {k + 1}/{len(order)}")
-            if len(nets[n]) < 2:
-                continue
-            width, clear, _ = classes.get(n, dflt)
-            rad = max(0, int(math.ceil((width / 2 + clear) / G)) - 1)
-            idx = sorted(nets[n], key=lambda i: (pads[i]["x"], pads[i]["y"]))
-            tree = {(l, *R.cell(pads[idx[0]]["x"], pads[idx[0]]["y"])) for l in (0, 1)}
-            left = idx[1:]
-            while left:
-                left.sort(key=lambda i: min(abs(pads[i]["x"] - c[2] * G) + abs(pads[i]["y"] - c[1] * G) for c in tree))
-                i = left.pop(0)
-                cy, cx = R.cell(pads[i]["x"], pads[i]["y"])
-                ys = [c[1] for c in tree] + [cy]
-                xs = [c[2] for c in tree] + [cx]
-                m = 40
-                box = (max(0, min(ys) - m), min(R.ny - 1, max(ys) + m), max(0, min(xs) - m), min(R.nx - 1, max(xs) + m))
-                path = R.route(nid[n], list(tree), [(0, cy, cx), (1, cy, cx)], rad, box)
-                if path is None:                             # в окне не прошла — обход по всей плате
-                    path = R.route(nid[n], list(tree), [(0, cy, cx), (1, cy, cx)], rad,
-                                   (0, R.ny - 1, 0, R.nx - 1), limit=700000)
-                if path is None:
-                    failed.append((n, pads[i]["ref"], pads[i]["pad"]["name"]))
-                    continue
-                R.mark(path, nid[n], width / 2, clear)
-                seg = [path[0]]
-                for a, b in zip(path, path[1:]):
-                    if a[0] != b[0]:
-                        tracks.append({"net": n, "layer": a[0], "w": width, "pts": [(c[2] * G, c[1] * G) for c in seg]})
-                        vias.append({"net": n, "x": a[2] * G, "y": a[1] * G})
-                        seg = [b]
-                    else:
-                        seg.append(b)
-                tracks.append({"net": n, "layer": seg[0][0], "w": width, "pts": [(c[2] * G, c[1] * G) for c in seg]})
-                tree |= set(path)
-        if best is None or len(failed) < len(best[2]):
-            best = (tracks, vias, failed)
+            paths[n], f = route_net(R, n)
+            failed += f
+        if best is None or len(failed) < len(best[1]):
+            best = (paths, failed)
         if not failed:
             break
         bad = {f[0] for f in failed}                          # не разведённые — первыми в следующей попытке
         order = [n for n in order if n in bad] + [n for n in order if n not in bad]
+    paths, failed = best
+    # ---------- переразводка (rip-up & reroute) ----------
+    for rnd in range(ripup_rounds):
+        if not failed:
+            break
+        improved = False
+        for n in sorted({f[0] for f in failed}):
+            if progress:
+                progress(f"переразводка: цепь {n} (осталось {len(failed)} связей)")
+            probe = fresh()                                  # путь без чужих дорожек — где цепь хотела бы пройти
+            probe_paths, _ = route_net(probe, n)
+            want = {(c[1], c[2]) for pth in probe_paths for c in pth}
+            occ = fresh(paths, skip={n})
+            blockers = set()
+            for y, x in want:
+                for l in (0, 1):
+                    o = occ.own[l, y, x]
+                    if o >= 0 and names[o] != n:
+                        blockers.add(names[o])
+            blockers = {b for b in blockers if b in paths}
+            if not blockers or len(blockers) > 8:
+                continue
+            group = [n] + sorted(blockers, key=hpwl)
+            R = fresh(paths, skip=set(group))
+            new_paths, new_fail = {}, []
+            for g in group:
+                new_paths[g], f = route_net(R, g)
+                new_fail += f
+            old_fail = [f for f in failed if f[0] in group]
+            if len(new_fail) < len(old_fail):
+                paths.update(new_paths)
+                failed = [f for f in failed if f[0] not in group] + new_fail
+                improved = True
+        if not improved:
+            break
+    tracks, vias = [], []
+    for n, ps in paths.items():
+        width = classes.get(n, dflt)[0]
+        for path in ps:
+            seg = [path[0]]
+            for a, b in zip(path, path[1:]):
+                if a[0] != b[0]:
+                    tracks.append({"net": n, "layer": a[0], "w": width, "pts": [(c[2] * G, c[1] * G) for c in seg]})
+                    vias.append({"net": n, "x": a[2] * G, "y": a[1] * G})
+                    seg = [b]
+                else:
+                    seg.append(b)
+            tracks.append({"net": n, "layer": seg[0][0], "w": width, "pts": [(c[2] * G, c[1] * G) for c in seg]})
+    best = (tracks, vias, failed)
     tracks, vias, failed = best
     for t in tracks:                                          # убрать промежуточные точки на прямых участках
         pts = t["pts"]
@@ -781,12 +849,100 @@ def signature(nl):
     return hashlib.sha1("\n".join(rows).encode("utf-8")).hexdigest()[:16]
 
 
-def remember(sig, parts_n, factor, W, H, unrouted, vias, seconds):
+AFFINITY = Path(__file__).resolve().parent / "learned" / "pcb_affinity.json"
+
+
+def strategies(parts_n):
+    """Варианты попыток: зазор между корпусами, запас площади, порядок разводки. Сначала — то, что по опыту
+    чаще давало полную разводку на платах похожего размера (меньше площадь — лучше), потом — остальные."""
+    base = learned_factor(parts_n)
+    pool = [{"gap": g, "factor": round(base * f, 3), "order": o}
+            for g, f in ((1.27, 1.0), (2.2, 1.12), (3.2, 1.25)) for o in ("wide", "short")]
+    score = {}
+    if HISTORY.exists():
+        for line in HISTORY.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "gap" not in r or not (0.6 * parts_n <= r["parts"] <= 1.6 * parts_n):
+                continue
+            key = (round(r["gap"], 2), r.get("order", "wide"))
+            ok, n = score.get(key, (0, 0))
+            score[key] = (ok + (r["unrouted"] == 0), n + 1)
+
+    def rank(st):
+        ok, n = score.get((round(st["gap"], 2), st["order"]), (0, 0))
+        return (-(ok + 1) / (n + 2), st["gap"], st["order"] != "wide")   # успехи с поправкой на число проб
+    pool.sort(key=rank)
+    out, seen = [], set()
+    for st in pool:                                    # разные зазоры в первых попытках
+        if st["gap"] not in seen or len(out) >= 3:
+            out.append(st)
+            seen.add(st["gap"])
+    return out
+
+
+def learn_affinity(P, pos):
+    """Идеальная плата учит расстановку: для деталей на одной цепи — какие пары типов стоят рядом и насколько."""
+    table = core.load_json(AFFINITY) or {}
+    nets = {}
+    for r, (x, y, rot) in pos.items():
+        for pd, px, py in pad_positions(P[r], x, y, rot):
+            n = P[r]["pins"].get(pd["name"])
+            if n:
+                nets.setdefault(n, []).append((r, px, py))
+    for n, pts in nets.items():
+        if not 2 <= len({r for r, _, _ in pts}) <= 6:   # общие шины ничему не учат
+            continue
+        for i, (ra, xa, ya) in enumerate(pts):
+            for rb, xb, yb in pts[i + 1:]:
+                if ra == rb:
+                    continue
+                ta, tb = sorted((P[ra]["type"] or "X", P[rb]["type"] or "X"))
+                d = abs(xa - xb) + abs(ya - yb)
+                e = table.setdefault(f"{ta}|{tb}", {"n": 0, "sum": 0.0})
+                e["n"] += 1
+                e["sum"] = round(e["sum"] + d, 2)
+    AFFINITY.write_text(json.dumps(table, ensure_ascii=False, indent=0), encoding="utf-8")
+
+
+def affinity_weights(P, big=()):
+    """Вес связи детали с цепью для расстановки: пары типов, которые на идеальных платах стоят близко
+    (развязка у микросхемы, резистор затвора у ключа), тянутся сильнее — до ×3."""
+    table = core.load_json(AFFINITY) or {}
+    if not table:
+        return {}
+    by_net = {}
+    for r, p in P.items():
+        for n in set(p["pins"].values()):
+            if n and n not in big:
+                by_net.setdefault(n, []).append(r)
+    wts = {}
+    for r, p in P.items():
+        for n in set(p["pins"].values()):
+            if not n or n in big:
+                continue
+            best = 1.0
+            for q in by_net.get(n, []):
+                if q == r:
+                    continue
+                ta, tb = sorted((p["type"] or "X", P[q]["type"] or "X"))
+                e = table.get(f"{ta}|{tb}")
+                if e and e["n"] >= 3:
+                    mean = e["sum"] / e["n"]
+                    best = max(best, 1.0 + min(2.0, 12.0 / max(mean, 3.0)) * min(1.0, e["n"] / 10))
+            if best > 1.0:
+                wts.setdefault(r, {})[n] = round(best, 2)
+    return wts
+
+
+def remember(sig, parts_n, factor, W, H, unrouted, vias, seconds, gap=None, order=None):
     HISTORY.parent.mkdir(exist_ok=True)
     with open(HISTORY, "a", encoding="utf-8") as f:
         f.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "sig": sig, "parts": parts_n, "factor": round(factor, 3),
                             "board": [round(W, 1), round(H, 1)], "unrouted": unrouted, "vias": vias,
-                            "sec": round(seconds)}, ensure_ascii=False) + "\n")
+                            "sec": round(seconds), "gap": gap, "order": order}, ensure_ascii=False) + "\n")
 
 
 def learned_factor(parts_n, default=1.35):
@@ -803,9 +959,7 @@ def learned_factor(parts_n, default=1.35):
             (ok if r["unrouted"] == 0 else bad).append(r["factor"])
     if ok:
         return min(ok)
-    if bad:                                           # полностью не разводилось — начать с большего запаса
-        return max(default, max(bad) * 1.12)
-    return default
+    return default                                    # площадь при неудачах не раздуваем — помогает зазор и порядок
 
 
 def make(project, W=None, H=None, progress=None, force=False, tries=3):
@@ -848,23 +1002,26 @@ def make(project, W=None, H=None, progress=None, force=False, tries=3):
         from_ideal = True
     else:
         from_ideal = False
-        factor = learned_factor(len(P))
         best = None
-        for k in range(tries):                         # перерасчёт: не разведено — плата просторнее
+        for k, st in enumerate(strategies(len(P))[:tries]):   # перерасчёт: лучшее по опыту — первым
             if progress:
-                progress(f"расстановка (попытка {k + 1}/{tries}, запас площади ×{factor:.2f})")
+                progress(f"расстановка (попытка {k + 1}/{tries}: зазор {st['gap']:.1f} мм, запас ×{st['factor']:.2f}, "
+                         f"порядок «{st['order']}»)")
             t0 = time.time()
-            Wk, Hk, pos_k = place(P, W, H, factor=factor)
-            res = route_board(P, pos_k, Wk, Hk, classes, progress=progress)
-            remember(sig, len(P), factor, Wk, Hk, len(res[3]), len(res[2]), time.time() - t0)
+            GAP[0] = st["gap"]
+            Wk, Hk, pos_k = place(P, W, H, factor=st["factor"])
+            res = route_board(P, pos_k, Wk, Hk, classes, progress=progress, order_mode=st["order"])
+            remember(sig, len(P), st["factor"], Wk, Hk, len(res[3]), len(res[2]), time.time() - t0,
+                     gap=st["gap"], order=st["order"])
             key = (len(res[3]), Wk * Hk)
             if best is None or key < best[0]:
                 best = (key, Wk, Hk, pos_k, res)
             if not res[3] or W:
                 break
-            factor *= 1.12
+        GAP[0] = 1.27
         _, W, H, pos, (pads, tracks, vias, failed) = best
-        if not failed:                                 # разведено всё — запомнить как идеал
+        if not failed:                                 # разведено всё — запомнить как идеал и чему он учит
+            learn_affinity(P, pos)
             (out / "ideal.json").write_text(json.dumps(
                 {"sig": sig, "board": [W, H], "pos": {r: list(v) for r, v in pos.items()},
                  "tracks": tracks, "vias": vias, "saved": time.strftime("%Y-%m-%d %H:%M:%S")},
