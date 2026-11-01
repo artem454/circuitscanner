@@ -26,7 +26,7 @@ POOL = LEARNED / "pool"
 GENS = LEARNED / "generations.json"
 SKIP_KINDS = {"R", "U"}                                  # корпуса-прямоугольники определяются правилами
 KNN_CONF, SHAPE_P = 0.85, 0.85                           # уверенность обеих моделей для метки поколения
-GATE_PREC, GATE_MIN = 0.35, 5                            # класс точнее 35 % на проверенных листах — иначе блок
+GATE_PREC, GATE_MIN = 0.6, 5                             # метки поколения — только классам с точностью ≥60 % на ≥5 ответах проверенных листов
 AUTO_EVERY = 10                                          # новое поколение — после стольких новых схем
 
 
@@ -110,7 +110,7 @@ def due():
     return len(_state()["pending"]) >= AUTO_EVERY
 
 
-def validate(knn, shape):
+def validate(knn, shape, agree_only=False):
     """Точность каждого класса на проверенных листах (по типам деталей в клетках символа).
     Класс, который там часто ошибается, не получает меток поколения — ошибки не закрепляются."""
     import core
@@ -129,12 +129,12 @@ def validate(knn, shape):
             types.setdefault(str(c.get("cell", "")).upper(), set()).add(c.get("type"))
         for i in range(len(d["key"])):
             lab, c1 = knn.predict(d["feat"][i].astype(np.float32))
-            if lab == "OTHER" or c1 < KNN_CONF:
+            if lab in ("OTHER", "GND", "PORT") or (c1 < KNN_CONF and not agree_only):   # земля/питание — цепь, не деталь
                 continue
             if shape is not None:
-                lab2, p2 = shape.predict(d["crop"][i], d["dims"][i])
-                if lab2 != lab or p2 < SHAPE_P:
-                    continue
+                lab2, p2 = shape.predict(d["crop"][i], d["dims"][i], trusted_only=False)
+                if lab2 != lab or (p2 < SHAPE_P and not agree_only):
+                    continue                          # agree_only — как в netlist: согласны — уверенно
             x0, y0, x1, y1 = d["box"][i]
             cells = {chr(65 + int(x // cell)) + str(int(y // cell) + 1) for x in (x0, x1) for y in (y0, y1)}
             truth = set().union(*(types.get(c, set()) for c in cells))
@@ -143,6 +143,12 @@ def validate(knn, shape):
             cnt[lab] = cnt.get(lab, 0) + 1
             hit[lab] = hit.get(lab, 0) + ok
     return {k: (hit[k] / cnt[k], cnt[k]) for k in cnt}
+
+
+def _overall(prec):
+    """Общая точность уверенных ответов на проверенных листах (по всем классам)."""
+    n = sum(c for _, c in prec.values())
+    return round(sum(p * c for p, c in prec.values()) / n, 3) if n else None
 
 
 def run_generation(progress=None, retrain=True):
@@ -155,24 +161,40 @@ def run_generation(progress=None, retrain=True):
         return None
     st = _state()
     g = len(st["history"]) + 1
+    # отпечаток данных: схемы в пуле, ваши правки, все примеры — без новых данных повтор отклонённого бессмыслен
+    finger = [len(files), sum(int((_load(f)["status"] == "user").sum()) for f in files),
+              int(np.load(LEARNED / "symbols.npz")["y"].shape[0]) if (LEARNED / "symbols.npz").exists() else 0]
+    if st["history"] and st["history"][-1].get("rejected") and st["history"][-1].get("data") == finger:
+        say("новых схем и правок нет — прошлое поколение отклонено, повтор не нужен")
+        return None
     knn = analyzer.SymbolModel()
     shape = symclass.Model() if symclass.MODEL.exists() else None
     say(f"поколение {g}: проверка классов на проверенных листах")
     prec = validate(knn, shape)
-    blocked = {k for k, (p, n) in prec.items() if n >= GATE_MIN and p < GATE_PREC}
+    allowed = {k for k, (p, n) in prec.items() if n >= GATE_MIN and p >= GATE_PREC}   # только доказанно точные классы
+    blocked = set(prec) - allowed
+    acc_before = _overall(validate(knn, shape, agree_only=True))
+    import shutil
+    backup = {}                                          # для отката, если поколение ухудшит точность
+    for f in (LEARNED / "symbols.npz", LEARNED / "symdata.npz", LEARNED / "symbol_mlp.npz"):
+        if f.exists():
+            backup[f] = f.with_suffix(".bak")
+            shutil.copyfile(f, backup[f])
+    pool_backup = {}
     total = user = gen = new = revoked = 0
     ex_f, ex_c, ex_d, ex_y = [], [], [], []
     for fi, path in enumerate(files):
         say(f"поколение {g}: схема {fi + 1}/{len(files)}")
         d = _load(path)
         d["label"] = d["label"].astype("<U16")
+        pool_backup[path] = (d["status"].copy(), d["label"].copy(), d["gen"].copy())
         for i in range(len(d["key"])):
             total += 1
             if d["status"][i] == "user":
                 user += 1
                 continue
             lab1, c1 = knn.predict(d["feat"][i].astype(np.float32))
-            ok = lab1 != "OTHER" and c1 >= KNN_CONF and lab1 not in blocked
+            ok = lab1 in allowed and c1 >= KNN_CONF
             if ok and shape is not None:
                 lab2, p2 = shape.predict(d["crop"][i], d["dims"][i])
                 ok = lab2 == lab1 and p2 >= SHAPE_P
@@ -197,9 +219,25 @@ def run_generation(progress=None, retrain=True):
         net, meta = symclass.train()
         symclass.save_model(net, meta)
     analyzer._MODEL.clear()
+    say(f"поколение {g}: проверка точности после обучения")
+    acc_after = _overall(validate(analyzer.SymbolModel(), symclass.Model() if symclass.MODEL.exists() else None,
+                                  agree_only=True))
+    rejected = acc_before is not None and acc_after is not None and acc_after < acc_before - 0.005
+    if rejected:                                         # точность упала — поколение откатить целиком
+        for f, b in backup.items():
+            shutil.copyfile(b, f)
+        for path, (stt, lab, gg) in pool_backup.items():
+            d = _load(path)
+            d["status"], d["label"], d["gen"] = stt, lab, gg
+            _save(path, d)
+        analyzer._MODEL.clear()
+    for b in backup.values():
+        b.unlink(missing_ok=True)
     row = {"gen": g, "time": time.strftime("%Y-%m-%d %H:%M:%S"), "schematics": len(files), "symbols": total,
            "user": user, "by_generation": gen, "unknown": total - user - gen, "new": new, "revoked": revoked,
            "resolved_pct": round(100 * (user + gen) / max(1, total), 1), "blocked": sorted(blocked),
+           "precision_before": acc_before, "precision_after": acc_after, "rejected": bool(rejected),
+           "data": finger,
            "class_precision": {k: round(p, 2) for k, (p, n) in sorted(prec.items())}}
     st["history"].append(row)
     st["pending"] = []
@@ -211,10 +249,12 @@ def stats_text():
     h = _state()["history"]
     if not h:
         return "Поколений ещё не было."
-    lines = ["Пок. | схем | символов | определено | ваши | новых | снято | заблокированы (ошибались на проверенных)"]
+    lines = ["Пок. | схем | символов | определено | ваши | новых | снято | без меток (точность не доказана)"]
     for r in h:
+        acc = (f" | точность {r['precision_before']}→{r['precision_after']}" if r.get("precision_after") is not None else "")
         lines.append(f"{r['gen']:4} | {r['schematics']:4} | {r['symbols']:8} | {r['resolved_pct']:9.1f}% | "
-                     f"{r['user']:4} | {r['new']:5} | {r['revoked']:5} | {', '.join(r.get('blocked', [])) or '—'}")
+                     f"{r['user']:4} | {r['new']:5} | {r['revoked']:5} | {', '.join(r.get('blocked', [])) or '—'}"
+                     + acc + (" | ОТКЛОНЕНО: точность упала, откат" if r.get("rejected") else ""))
     return "\n".join(lines)
 
 

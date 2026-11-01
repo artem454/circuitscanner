@@ -500,7 +500,7 @@ class SymbolModel:
     """k ближайших соседей по сохранённым примерам learned/symbols.npz."""
 
     def __init__(self, path=LEARNED / "symbols.npz"):
-        self.X = self.y = self.trusted = None
+        self.X = self.y = self.trusted = self.real = None
         if Path(path).exists():
             d = np.load(path, allow_pickle=False)
             self.X, self.y = d["X"].astype(np.float32), d["y"]
@@ -508,16 +508,24 @@ class SymbolModel:
             # на реальных схемах ошибался почти всегда — такой ответ не выдаём
             src = d["src"] if "src" in d.files else None
             self.trusted = set(map(str, self.y[src != "synth"])) if src is not None and (src != "synth").any() else None
+            self.real = (src != "synth") if src is not None else None   # не синтетика: листы, правки, эталоны, PDF
 
     def ready(self):
         return self.X is not None and len(self.X) >= 10
 
     def predict(self, f, k=5, trusted_only=True):
         sims = self.X[:, :-2] @ f[:-2] - 0.5 * np.abs(self.X[:, -2] - f[-2])
-        idx = np.argsort(-sims)[:k]
+        idx = list(np.argsort(-sims)[:k])
+        w = np.ones(len(sims), np.float32) if self.real is None else np.where(self.real, 3.0, 1.0)
+        if self.real is not None and self.real.any():
+            # реальные и проверенные примеры (листы, правки, эталоны, PDF) — их трое ближайших тоже голосуют,
+            # если похожи почти как лучший синтетический: иначе их тонет в тысячах синтетических
+            rs = np.where(self.real, sims, -1e9)
+            top = float(sims[idx[0]])
+            idx += [int(i) for i in np.argsort(-rs)[:3] if rs[i] >= top - 0.06 and int(i) not in idx]
         votes = {}
         for i in idx:
-            votes[str(self.y[i])] = votes.get(str(self.y[i]), 0) + max(sims[i], 0)
+            votes[str(self.y[i])] = votes.get(str(self.y[i]), 0) + max(sims[i], 0) * w[i]
         lab = max(votes, key=votes.get)
         conf = round(float(votes[lab] / (sum(votes.values()) + 1e-6)), 2)
         if trusted_only and self.trusted is not None and lab not in self.trusted:
