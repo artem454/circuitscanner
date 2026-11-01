@@ -413,6 +413,7 @@ class App(tk.Tk):
         self.analysis = res
         self.status.set("Анализ без ИИ: " + analyzer.summary(res) +
                         ". Цепи — кнопка «Оригинал / чистая / цепи»; Claude получит их подсказкой.")
+        self.generation()                             # накопилось новых схем — очередное поколение
         if self.view_bg == "analysis":
             self._load_bg()
             self.redraw()
@@ -434,6 +435,7 @@ class App(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def _autonet_done(self, nl):
+        self.generation()
         n = len(nl["components"])
         named = sum(1 for c in nl["components"] if "?" not in c["ref"])
         vals = sum(1 for c in nl["components"] if c["value"])
@@ -580,6 +582,32 @@ class App(tk.Tk):
         except Exception:
             last = []
         self.status.set("Обучение завершено. " + (last[0] if last else ""))
+        self.generation(force=True)                  # после ручного дообучения — новое поколение
+
+    def generation(self, force=False):
+        """Поколение самообучения в фоне: пул символов всех схем → уверенные согласия обеих моделей → обучение."""
+        import generations
+        if getattr(self, "_gen_thread", None) and self._gen_thread.is_alive():
+            return
+        if not force and not generations.due():
+            return
+
+        def work():
+            try:
+                row = generations.run_generation(
+                    progress=lambda m: self.after(0, self.status.set, f"Самообучение: {m}…"))
+                if row:
+                    hist = generations._state()["history"]
+                    prev = hist[-2]["resolved_pct"] if len(hist) > 1 else None
+                    msg = (f"Поколение {row['gen']}: схем {row['schematics']}, символов {row['symbols']}, определено "
+                           f"{row['resolved_pct']}%" + (f" (было {prev}%)" if prev is not None else "") +
+                           f"; новых {row['new']}, снято спорных {row['revoked']}, ваших правок {row['user']}")
+                    self.after(0, self.status.set, msg)
+                    self.bridge.action("generation", **row)
+            except Exception as e:
+                self.after(0, self.status.set, f"Самообучение не удалось: {e}")
+        self._gen_thread = threading.Thread(target=work, daemon=True)
+        self._gen_thread.start()
 
     def _tree(self, nb, title, cols):
         frame = ttk.Frame(nb)
@@ -1011,6 +1039,23 @@ class App(tk.Tk):
         return True
 
     @staticmethod
+    def _ref_types(prefix):
+        """Типы по буквам позиционного обозначения (ГОСТ 2.710 и распространённые зарубежные)."""
+        import autonet
+        out = []
+        for k in range(len(prefix), 0, -1):                    # самое длинное совпадение: «VD» раньше «V»
+            p = prefix[:k]
+            for t, (_ru, _n, gost) in sorted(core.TYPE_RU.items(), key=lambda kv: "/" in kv[1][2]):
+                if p in [g.strip().upper() for g in gost.split("/")] and t not in out:
+                    out.append(t)                              # основной тип буквы — раньше «VD/VT/R»
+            t = autonet.PREFIX2TYPE.get(p)
+            if t and t not in out:
+                out.append(t)
+            if out:
+                break
+        return out
+
+    @staticmethod
     def _type_codes():
         if not hasattr(App, "_codes"):
             codes = {}
@@ -1100,16 +1145,90 @@ class App(tk.Tk):
         v_type = tk.StringVar(value=by_code.get(c.get("type", "X"), c.get("type", "X")))
         v_val = tk.StringVar(value=c.get("value", ""))
         types = list(choices)
-        for row, (lab, w) in enumerate((("Обозначение (как на схеме)", ttk.Entry(form, textvariable=v_ref, width=18)),
-                                        ("Тип", ttk.Combobox(form, textvariable=v_type, values=types, width=50,
-                                                             state="readonly")),
-                                        ("Номинал", ttk.Entry(form, textvariable=v_val, width=18)))):
-            ttk.Label(form, text=lab).grid(row=row, column=0, sticky="w", pady=2)
-            w.grid(row=row, column=1, sticky="w", padx=6)
+        # обозначение: по буквам (VT, VD, C, DA, K…) тип подбирается сам
+        ttk.Label(form, text="Обозначение (как на схеме)").grid(row=0, column=0, sticky="w", pady=2)
+        e_ref = ttk.Entry(form, textvariable=v_ref, width=18)
+        e_ref.grid(row=0, column=1, sticky="w", padx=6)
+        v_auto = tk.StringVar()
+        ttk.Label(form, textvariable=v_auto, foreground="#2e7d32").grid(row=0, column=2, sticky="w")
+        # тип: поиск по набору + список
+        ttk.Label(form, text="Тип — начните вводить").grid(row=1, column=0, sticky="nw", pady=2)
+        tbox = ttk.Frame(form)
+        tbox.grid(row=1, column=1, columnspan=2, sticky="w", padx=6)
+        v_find = tk.StringVar()
+        e_find = ttk.Entry(tbox, textvariable=v_find, width=52)
+        e_find.pack(fill="x")
+        lb = tk.Listbox(tbox, height=9, width=60, exportselection=False, font=("Segoe UI", 9))
+        sb_ = ttk.Scrollbar(tbox, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=sb_.set)
+        lb.pack(side="left", fill="both")
+        sb_.pack(side="left", fill="y")
+        ttk.Label(form, text="Выбрано:").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Label(form, textvariable=v_type, foreground="#1565c0").grid(row=2, column=1, columnspan=2, sticky="w", padx=6)
+        ttk.Label(form, text="Номинал").grid(row=3, column=0, sticky="w", pady=2)
+        ttk.Entry(form, textvariable=v_val, width=18).grid(row=3, column=1, sticky="w", padx=6)
         ttk.Label(form, text="«Земля» — символ земли/корпуса: его цепь становится GND. «Питание» — стрелка или "
                              "метка питания: напряжение впишите в «Номинал» (+12V). «НЕ ДЕТАЛЬ» — обрывок "
                              "надписи, рамка: удаляется. Ядро запоминает каждый выбор",
-                  foreground="#777", wraplength=330).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+                  foreground="#777", wraplength=480).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        codes = App._type_codes()
+        shown = []
+
+        def refresh(*_):
+            q = v_find.get().strip().lower()
+            words = q.split()
+            exact = set()
+            for w in words:
+                exact |= codes.get(w, set())
+            def ok(label):
+                code = choices[label]
+                if not words:
+                    return True
+                return code in exact or all(w in label.lower() for w in words)
+            items = [k for k in types if ok(k)]
+            first = words[0] if words else ""
+            items.sort(key=lambda k: (choices[k] not in exact,
+                                      k.lower().find(first) if first and first in k.lower() else 999, types.index(k)))
+            shown[:] = items
+            lb.delete(0, "end")
+            for k in items:
+                lb.insert("end", k)
+            cur = v_type.get()
+            if cur in items:
+                i = items.index(cur)
+                lb.selection_set(i)
+                lb.see(i)
+            elif items and words:
+                lb.selection_set(0)
+                v_type.set(items[0])
+
+        def pick(_=None):
+            sel = lb.curselection()
+            if sel:
+                v_type.set(shown[sel[0]])
+        lb.bind("<<ListboxSelect>>", pick)
+        v_find.trace_add("write", refresh)
+        e_find.bind("<Down>", lambda e: (lb.focus_set(), lb.selection_clear(0, "end"), lb.selection_set(0), pick()))
+        manual = {"on": False}
+        lb.bind("<Button-1>", lambda e: manual.update(on=True), add="+")
+        e_find.bind("<Key>", lambda e: manual.update(on=True), add="+")
+
+        def by_ref(*_):
+            """VT3 → транзистор, C12 → конденсатор, DA1 → микросхема: по буквам позиционного обозначения."""
+            m = re.match(r"[A-Za-zА-Яа-я]+", v_ref.get().strip())
+            if not m or manual["on"]:
+                return v_auto.set("")
+            cand = App._ref_types(m.group(0).upper())
+            if not cand:
+                return v_auto.set("")
+            cur = choices.get(v_type.get())
+            t = cur if cur in cand else cand[0]
+            v_type.set(by_code[t])
+            v_auto.set(f"по буквам {m.group(0).upper()} → {core.type_name(t)}")
+            refresh()
+        v_ref.trace_add("write", by_ref)
+        refresh()
+        e_find.focus_set()
         hint = {t: d for t, d in core.TYPES.items()}
 
         def save(next_=True):
@@ -1123,7 +1242,7 @@ class App(tk.Tk):
                 return messagebox.showwarning("Исправить деталь", str(e), parent=win)
             teach.save_netlist(self.project, self.netlist)
             self.bridge.action("edit_component", ref=ref, new_ref=new_ref, type=new_type, value=v_val.get().strip())
-            report = teach.teach(self.project, c, new_type, new_ref, ref)
+            report = teach.teach(self.project, c, new_type, new_ref, ref, new_value=v_val.get().strip())
             win.destroy()
             self.load_netlist()
             what = {"GND": "символ земли — цепь стала GND", "PWR": "метка питания — цепь подписана",

@@ -741,6 +741,11 @@ def analyze(project, ocr=True, progress=None, params=None):
     gray0 = core.imread(project / "clean.png")[:, :, 0]
     res = analyze_gray(gray0, load_params(params), ocr, progress)
     res["classified"] = classify(res)
+    try:                                         # каждая схема — в пул поколений (символы не забываются)
+        import generations
+        generations.add_from_analysis(project, res)
+    except Exception:
+        pass
     cell = manifest["grid"]["cell"]
 
     def cell_of(x, y):

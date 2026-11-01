@@ -34,7 +34,7 @@ def _ink_and_stroke(project):
     return gray, ink, max(1, int(round(float(sw)))), res
 
 
-def teach(project, comp, new_type, new_ref=None, old_ref=None):
+def teach(project, comp, new_type, new_ref=None, old_ref=None, new_value=None):
     """Запомнить правильный класс символа детали comp (нужен её «box» из netlist без ИИ).
     Возвращает строку-отчёт о том, чему научились."""
     box = [int(round(v)) for v in comp["box"]] if comp.get("box") else None
@@ -49,10 +49,20 @@ def teach(project, comp, new_type, new_ref=None, old_ref=None):
     learn.save_examples([analyzer.symbol_features(ink, box, sw)], [cls], src)
     analyzer._MODEL.clear()                                  # kNN перечитает примеры при следующем разборе
     done = [f"символ запомнен как «{cls}»"]
+    try:                                                     # в пуле поколений — проверенный вами
+        import generations
+        generations.mark_user(project, box, cls)
+    except Exception:
+        pass
     if new_ref and new_ref != old_ref and new_type not in (NOT_PART, "GND", "PWR"):
         got = learn_ref_glyphs(gray, res, box, new_ref)
         if got:
             done.append(f"буквы обозначения «{new_ref}» — в чтение надписей ({got})")
+    old_val = str(comp.get("value", "") or "")
+    if new_value and new_value != old_val and new_type not in (NOT_PART, "GND", "PWR"):
+        got = learn_ref_glyphs(gray, res, box, new_value)    # номинал: начертание цифр и букв — в OCR
+        if got:
+            done.append(f"номинал «{new_value}» — в чтение надписей ({got})")
     retrain_async()
     return "; ".join(done)
 

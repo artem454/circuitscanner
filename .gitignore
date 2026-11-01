@@ -13,3 +13,5 @@ session/
 .mcp.json
 learned/pcb_history.jsonl
 learned/pcb_affinity.json
+learned/pool/
+learned/generations.json

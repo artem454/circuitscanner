@@ -184,7 +184,7 @@ def train(exclude_real=False, hidden=(64,), epochs=60, data=None):
     Xn = ((X - mu) / sd).astype(np.float32)
     yi = np.array([classes.index(c) for c in y])
     cnt = {c: (y == c).sum() for c in classes}
-    w = np.array([(1 / math.sqrt(cnt[lab])) * (3.0 if not si.startswith("synth") else 1.0)
+    w = np.array([(1 / math.sqrt(cnt[lab])) * (1.5 if si.startswith("gen") else 3.0 if not si.startswith("synth") else 1.0)
                   for lab, si in zip(y, s)], np.float32)
     w *= len(w) / w.sum()
     net = MLP([X.shape[1], *hidden, len(classes)]).fit(Xn, yi, w, epochs=epochs)
