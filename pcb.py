@@ -221,7 +221,7 @@ def build_parts(nl):
             out["X_" + r] = {"ref": "X_" + r, "type": "TERM", "value": f"к {r}", "pins": pins, "fp": fp, "edge": True}
         else:
             out[r] = {"ref": r, "type": t, "value": c.get("value", ""), "pins": c["pins"], "fp": footprint(c),
-                      "edge": t in ("J", "TERM", "X")}
+                      "edge": t in ("J", "TERM")}       # «X» (неопознанное) — обычная деталь, не разъём
     # выводы-метки схемы, которые не выходят на разъём, — общий клеммник XP
     on_term = {n for p in out.values() if p.get("edge") for n in p["pins"].values()}
     used = {n for p in out.values() for n in p["pins"].values()}
@@ -262,12 +262,16 @@ def place(P, W=None, H=None):
     if not W:
         W = math.ceil(math.sqrt(area * 1.35 * 1.4) / MIL) * MIL
         H = math.ceil(area * 1.35 / W / MIL) * MIL
-    for attempt in range(6):
+        # разъёмы стоят по периметру — периметр должен вместить их длину
+        edge_len = sum(body_box(p, 0, 0, 90)[3] - body_box(p, 0, 0, 90)[1] for p in P.values() if p.get("edge"))
+        while 2 * (W + H) * 0.8 < edge_len:
+            W, H = W * 1.1, H * 1.1
+    for attempt in range(25):
         pos = _try_place(P, W, H)
         if pos:
             return W, H, pos
-        W, H = W * 1.1, H * 1.1
-    raise RuntimeError("не удалось расставить детали")
+        W, H = W * 1.1, H * 1.1                       # не поместилось — плата больше (до ×10 по площади)
+    raise RuntimeError(f"не удалось расставить {len(P)} деталей даже на плате {W:.0f}×{H:.0f} мм")
 
 
 def _overlap(a, b):
@@ -278,21 +282,35 @@ def _try_place(P, W, H):
     pos, boxes = {}, []
     nets_pins = {}
     edge = [r for r, p in P.items() if p.get("edge")]
-    # клеммники — по левому и правому краю
-    yl = yr = 2.0
-    for i, r in enumerate(sorted(edge, key=lambda r: -len(P[r]["pins"]))):
-        b0 = body_box(P[r], 0, 0, 90)
-        bh, bw = b0[3] - b0[1], b0[2] - b0[0]
-        if i % 2 == 0:
-            x, y = -b0[0] + 0.5, yl - b0[1]
-            yl += bh
-        else:
-            x, y = W + b0[0] - 0.5 - 0.0, yr - b0[1]
-            x = W - b0[2] - 0.5
-            yr += bh
-        if max(yl, yr) > H:
-            return None
-        pos[r] = (round(x / G) * G, round(y / G) * G, 90)
+    # клеммники — по периметру: левый, правый, верхний, нижний край; не уместившиеся — внутрь, как детали
+    fill = {"L": 2.0, "R": 2.0, "T": 2.0, "B": 2.0}
+    for r in sorted(edge, key=lambda r: -len(P[r]["pins"])):
+        placed = False
+        for side in sorted(fill, key=lambda k: fill[k] / (H if k in "LR" else W)):
+            rot = 90 if side in "LR" else 0
+            b0 = body_box(P[r], 0, 0, rot)
+            length = (b0[3] - b0[1]) if side in "LR" else (b0[2] - b0[0])
+            limit = H if side in "LR" else W
+            if fill[side] + length > limit - 2.0:
+                continue
+            if side == "L":
+                x, y = -b0[0] + 0.5, fill[side] - b0[1]
+            elif side == "R":
+                x, y = W - b0[2] - 0.5, fill[side] - b0[1]
+            elif side == "T":
+                x, y = fill[side] - b0[0], -b0[1] + 0.5
+            else:
+                x, y = fill[side] - b0[0], H - b0[3] - 0.5
+            bb = body_box(P[r], round(x / G) * G, round(y / G) * G, rot)
+            if any(_overlap(bb, o) for o in boxes):
+                fill[side] += length
+                continue
+            fill[side] += length
+            placed = True
+            break
+        if not placed:
+            continue
+        pos[r] = (round(x / G) * G, round(y / G) * G, rot)
         boxes.append(body_box(P[r], *pos[r]))
         for pd, px, py in pad_positions(P[r], *pos[r]):
             net = P[r]["pins"].get(pd["name"])
@@ -698,6 +716,12 @@ def make(project, W=None, H=None, progress=None):
     nl = core.load_json(project / "netlist.json")
     if not nl:
         raise FileNotFoundError("нет netlist.json — сначала распознайте схему")
+    comps = nl.get("components", [])
+    low = sum(1 for c in comps if c.get("confidence") == "low")
+    if nl.get("generated") == "autonet" and low > 0.3 * max(1, len(comps)):
+        raise ValueError(f"netlist — черновик без ИИ: {low} из {len(comps)} деталей под сомнением. Плата повторит "
+                         "все ошибки распознавания. Сначала исправьте сомнительные детали (вкладка «Компоненты» → "
+                         "«Исправить деталь») или отдайте схему Claude, потом стройте плату.")
     out = project / "pcb"
     out.mkdir(exist_ok=True)
     share = panel_share(nl)

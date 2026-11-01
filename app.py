@@ -123,6 +123,13 @@ class App(tk.Tk):
         self.tabs.pack(fill="both", expand=True)
         self.tv_comp = self._tree(self.tabs, "Компоненты", [("ref", "Обозн.", 70), ("type", "Тип", 50),
                                                             ("value", "Номинал", 120), ("cell", "Клетка", 55)])
+        crow = ttk.Frame(self.tv_comp.master)
+        crow.pack(side="top", fill="x", before=self.tv_comp)
+        ttk.Button(crow, text="Исправить деталь…", command=self.edit_comp).pack(side="left", padx=2, pady=2)
+        self.var_only_low = tk.BooleanVar(value=False)
+        ttk.Checkbutton(crow, text="только сомнения", variable=self.var_only_low,
+                        command=self._fill_lists).pack(side="left", padx=6)
+        self.tv_comp.bind("<Double-1>", lambda e: self.edit_comp())
         self.tv_net = self._tree(self.tabs, "Цепи", [("net", "Цепь", 130), ("n", "Выв.", 40),
                                                      ("label", "Метка", 120)])
         self.tv_issue = self._tree(self.tabs, "Проверка", [("lvl", "Уровень", 75), ("where", "Где", 70),
@@ -424,11 +431,6 @@ class App(tk.Tk):
         """Печатная плата по netlist.json (или схема соединений щита для релейно-контакторной схемы)."""
         if not self.project or not self.netlist:
             return messagebox.showinfo("Печатная плата", "Нужен netlist.json: сначала распознайте схему.")
-        low = [c["ref"] for c in self.netlist.get("components", []) if c.get("confidence") == "low"]
-        if len(low) > 0.3 * max(1, len(self.netlist.get("components", []))):
-            if not messagebox.askyesno("Печатная плата", f"В netlist {len(low)} деталей с низкой уверенностью — "
-                                       "плата повторит ошибки распознавания. Всё равно строить?"):
-                return
         self.status.set("Печатная плата: посадочные места и расстановка…")
 
         def work():
@@ -437,7 +439,8 @@ class App(tk.Tk):
                 res = pcb.make(self.project, progress=lambda m: self.after(0, self.status.set, f"Печатная плата: {m}…"))
                 self.after(0, self._pcb_done, res)
             except Exception as e:
-                self.after(0, self.status.set, f"Печатная плата не получилась: {e}")
+                self.after(0, self.status.set, "Печатная плата не построена")
+                self.after(0, lambda: messagebox.showwarning("Печатная плата", str(e)))
         threading.Thread(target=work, daemon=True).start()
 
     def _pcb_done(self, res):
@@ -614,6 +617,8 @@ class App(tk.Tk):
         for tv in (self.tv_comp, self.tv_net, self.tv_issue, self.tv_block):
             tv.delete(*tv.get_children())
         for ref, c in sorted(self.comps.items(), key=lambda kv: _natural(kv[0])):
+            if getattr(self, "var_only_low", None) and self.var_only_low.get() and c.get("confidence") != "low":
+                continue
             self.tv_comp.insert("", "end", iid=ref, values=(ref, c.get("type", ""), c.get("value", ""),
                                                            c.get("cell", "")),
                                 tags=("low",) if c.get("confidence") == "low" else ())
@@ -882,6 +887,85 @@ class App(tk.Tk):
         self.hl_cells = self._cells_of([ref])
         self._set_detail(self._comp_text(ref))
         self._focus_cells()
+
+    def edit_comp(self, ref=None):
+        """Правка сомнительной детали: обозначение, тип, номинал — и сразу дообучение ядра."""
+        import teach
+        if ref is None:
+            sel = self.tv_comp.selection()
+            if not sel:
+                return messagebox.showinfo("Исправить деталь", "Выберите деталь в списке (сомнительные — оранжевые).")
+            ref = sel[0]
+        c = self.comps.get(ref)
+        if not c:
+            return
+        self.hl_refs, self.hl_cells = {ref}, self._cells_of([ref])
+        self._focus_cells()
+        win = tk.Toplevel(self)
+        win.title(f"Деталь {ref}")
+        win.transient(self)
+        if c.get("box"):                                     # вырез символа крупно
+            x0, y0, x1, y1 = c["box"]
+            m = max(x1 - x0, y1 - y0) * 0.6 + 10
+            try:
+                img = Image.open(self.project / "clean.png").convert("RGB").crop(
+                    (int(x0 - m), int(y0 - m), int(x1 + m), int(y1 + m)))
+                img.thumbnail((360, 260))
+                k = 360 / max(img.size)
+                img = img.resize((int(img.size[0] * k), int(img.size[1] * k)))
+                ph = ImageTk.PhotoImage(img)
+                lb = ttk.Label(win, image=ph)
+                lb.image = ph
+                lb.pack(padx=6, pady=6)
+            except Exception:
+                pass
+        why = "низкая уверенность распознавания" if c.get("confidence") == "low" else "проверена" if c.get("checked") else ""
+        ttk.Label(win, text=f"Сейчас: {ref}, тип {c.get('type', '')}, номинал {c.get('value', '') or '—'}"
+                            + (f" ({why})" if why else "")).pack(anchor="w", padx=8)
+        form = ttk.Frame(win, padding=8)
+        form.pack(fill="x")
+        v_ref = tk.StringVar(value="" if "?" in ref else ref)
+        v_type = tk.StringVar(value=c.get("type", "X"))
+        v_val = tk.StringVar(value=c.get("value", ""))
+        types = list(core.TYPES) + [teach.NOT_PART]
+        for row, (lab, w) in enumerate((("Обозначение (как на схеме)", ttk.Entry(form, textvariable=v_ref, width=18)),
+                                        ("Тип", ttk.Combobox(form, textvariable=v_type, values=types, width=16)),
+                                        ("Номинал", ttk.Entry(form, textvariable=v_val, width=18)))):
+            ttk.Label(form, text=lab).grid(row=row, column=0, sticky="w", pady=2)
+            w.grid(row=row, column=1, sticky="w", padx=6)
+        ttk.Label(form, text="«НЕ ДЕТАЛЬ» — обрывок надписи, стрелка, рамка: удаляется и ядро учится их пропускать",
+                  foreground="#777", wraplength=330).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        hint = {t: d for t, d in core.TYPES.items()}
+
+        def save(next_=True):
+            new_type = v_type.get().strip()
+            if new_type not in types:
+                return messagebox.showwarning("Тип", "Выберите тип из списка", parent=win)
+            new_ref = v_ref.get().strip() or ref
+            try:
+                edited = teach.apply_edit(self.netlist, ref, new_ref, new_type, v_val.get().strip())
+            except Exception as e:
+                return messagebox.showwarning("Исправить деталь", str(e), parent=win)
+            teach.save_netlist(self.project, self.netlist)
+            report = teach.teach(self.project, c, new_type, new_ref, ref)
+            win.destroy()
+            self.load_netlist()
+            what = "удалена как «не деталь»" if edited is None else f"{edited['ref']} — {hint.get(new_type, new_type)}"
+            self.status.set(f"{ref}: {what}. Ядро: {report}. Модель формы переобучается в фоне.")
+            if next_:                                       # сразу следующая сомнительная
+                rest = [r for r, cc in sorted(self.comps.items(), key=lambda kv: _natural(kv[0]))
+                        if cc.get("confidence") == "low"]
+                if rest:
+                    self.tv_comp.selection_set(rest[0])
+                    self.tv_comp.see(rest[0])
+                    self.edit_comp(rest[0])
+
+        btns = ttk.Frame(win, padding=(8, 0, 8, 8))
+        btns.pack(fill="x")
+        ttk.Button(btns, text="Сохранить и следующая", command=save).pack(side="left")
+        ttk.Button(btns, text="Сохранить", command=lambda: save(False)).pack(side="left", padx=4)
+        ttk.Button(btns, text="Отмена", command=win.destroy).pack(side="right")
+        win.bind("<Return>", lambda e: save())
 
     def on_net(self, _=None):
         sel = self.tv_net.selection()

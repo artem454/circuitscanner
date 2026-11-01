@@ -210,10 +210,13 @@ def build(res, title="Автоматический разбор (без ИИ)", 
     for n in res["nets"]:
         for p in n["pins"]:
             pins_of.setdefault(p["symbol"], []).append((p["x"], p["y"], final[find(n["id"])]))
-    comps, counter, questions = [], {}, []
+    comps, counter, questions, junk = [], {}, [], 0
     for sid, s in syms.items():
         pins = pins_of.get(sid, [])
         if not pins:
+            continue
+        if len(pins) < 2 and not ref_of.get(sid) and (KIND2TYPE.get(s["kind"]) in GENERIC or s.get("uncertain")):
+            junk += 1                                        # один вывод, нет обозначения, тип не опознан — обрывок
             continue
         st = KIND2TYPE.get(s["kind"])
         ref = ref_of.get(sid)
@@ -271,7 +274,8 @@ def build(res, title="Автоматический разбор (без ИИ)", 
     if noref:
         questions.append({"cell": noref[0].get("cell", ""),
                           "text": f"Без прочитанного обозначения: {len(noref)} деталей (имена вида R?3)."})
-    return {"title": title, "generated": "autonet", "components": comps, "nets": nets_meta, "questions": questions}
+    return {"title": title, "generated": "autonet", "components": comps, "nets": nets_meta, "questions": questions,
+            "dropped_junk": junk}
 
 
 def run(project, progress=None, overwrite=False):
