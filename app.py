@@ -57,6 +57,8 @@ class App(tk.Tk):
         self._need_fit = False
 
         self._build_ui()
+        import bridge                               # журнал, состояние и команды для Claude Code / Codex
+        self.bridge = bridge.Bridge(self)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         if project:
             self.open_project(project)
@@ -90,6 +92,7 @@ class App(tk.Tk):
         ttk.Button(bar, text="Задание для Claude", command=self.copy_task).pack(side="left")
         ttk.Button(bar, text="Экспорт", command=self.export).pack(side="left", padx=4)
         ttk.Button(bar, text="Печатная плата", command=self.run_pcb).pack(side="left")
+        ttk.Button(bar, text="Ассистент", command=self.assistant).pack(side="left", padx=4)
         ttk.Button(bar, text="Папка проекта", command=self.open_folder).pack(side="left")
         ttk.Button(bar, text="Дообучить", command=self.train).pack(side="left", padx=4)
 
@@ -402,6 +405,7 @@ class App(tk.Tk):
 
     def run_autonet(self):
         """Собрать netlist самостоятельно (OCR + разбор). Проверенный netlist.json не затирается."""
+        self.bridge.action("run_autonet")
         if not self.project:
             return messagebox.showinfo("Нет проекта", "Сначала откройте картинку.")
         self.status.set("Netlist без ИИ: разбор и чтение надписей…")
@@ -427,8 +431,69 @@ class App(tk.Tk):
         self.status.set(f"Netlist без ИИ: деталей {n}, с прочитанным обозначением {named}, с номиналом {vals} → {where}. "
                         "Это черновик: сверяйте по картинке или отдайте Claude на доработку.")
 
+    def assistant(self):
+        """Подключение Claude Code / Codex: MCP-сервер видит состояние, журнал и снимок окна, может действовать."""
+        import shutil
+        import bridge
+        server = Path(__file__).resolve().parent / "mcp_server.py"
+        cfg = {"mcpServers": {"schematic-scanner": {"command": sys.executable, "args": [str(server)]}}}
+        win = tk.Toplevel(self)
+        win.title("Ассистент: Claude Code / Codex")
+        win.transient(self)
+        txt = ("Ассистент видит, что происходит в программе по факту: состояние окна, журнал действий и ошибок "
+               "(с полным текстом ошибки), снимок окна, файлы проекта — и может сам запустить анализ, netlist без ИИ, "
+               "плату, диагностику, выделить деталь.\n\n"
+               f"Журнал и состояние: {bridge.SESSION}\nMCP-сервер: {server}")
+        ttk.Label(win, text=txt, wraplength=560, justify="left", padding=10).pack(anchor="w")
+        res = tk.StringVar()
+
+        def to_claude():
+            places = [Path(__file__).resolve().parent] + ([self.project] if self.project else [])
+            for d in places:
+                p = d / ".mcp.json"
+                cur = core.load_json(p) or {}
+                cur.setdefault("mcpServers", {}).update(cfg["mcpServers"])
+                p.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+            res.set("Claude Code: .mcp.json записан в " + ", ".join(str(d) for d in places) +
+                    ". Откройте Claude Code в этой папке и разрешите сервер schematic-scanner.")
+            self.bridge.action("connect_claude", places=[str(d) for d in places])
+
+        def to_codex():
+            p = Path.home() / ".codex" / "config.toml"
+            if not messagebox.askyesno("Codex", f"Добавить сервер schematic-scanner в {p}?", parent=win):
+                return
+            p.parent.mkdir(exist_ok=True)
+            cur = p.read_text(encoding="utf-8") if p.exists() else ""
+            if "[mcp_servers.schematic-scanner]" not in cur:
+                cur += (f'\n[mcp_servers.schematic-scanner]\ncommand = {json.dumps(sys.executable)}\n'
+                        f'args = [{json.dumps(str(server))}]\n')
+                p.write_text(cur, encoding="utf-8")
+            res.set(f"Codex: сервер добавлен в {p}. Перезапустите Codex.")
+            self.bridge.action("connect_codex", path=str(p))
+
+        def terminal(cli):
+            exe = shutil.which(cli)
+            if not exe:
+                return res.set(f"{cli} не найден в PATH. Claude Code: приложение Claude (вкладка Code) или "
+                               "«npm i -g @anthropic-ai/claude-code»; Codex: «npm i -g @openai/codex».")
+            cwd = str(self.project or Path(__file__).resolve().parent)
+            subprocess.Popen(["cmd", "/c", "start", "cmd", "/k", cli], cwd=cwd)
+            res.set(f"{cli} открыт в {cwd}")
+
+        row = ttk.Frame(win, padding=(10, 0, 10, 6))
+        row.pack(fill="x")
+        ttk.Button(row, text="Подключить к Claude Code", command=to_claude).pack(side="left")
+        ttk.Button(row, text="Подключить к Codex", command=to_codex).pack(side="left", padx=4)
+        row2 = ttk.Frame(win, padding=(10, 0, 10, 6))
+        row2.pack(fill="x")
+        ttk.Button(row2, text="Открыть claude в терминале", command=lambda: terminal("claude")).pack(side="left")
+        ttk.Button(row2, text="Открыть codex в терминале", command=lambda: terminal("codex")).pack(side="left", padx=4)
+        ttk.Button(row2, text="Папка журнала", command=lambda: os.startfile(bridge.SESSION)).pack(side="left", padx=4)
+        ttk.Label(win, textvariable=res, wraplength=560, foreground="#1565c0", padding=10).pack(anchor="w")
+
     def run_pcb(self):
         """Печатная плата по netlist.json (или схема соединений щита для релейно-контакторной схемы)."""
+        self.bridge.action("run_pcb")
         if not self.project or not self.netlist:
             return messagebox.showinfo("Печатная плата", "Нужен netlist.json: сначала распознайте схему.")
         self.status.set("Печатная плата: посадочные места и расстановка…")
@@ -544,6 +609,7 @@ class App(tk.Tk):
 
     def open_project(self, path):
         path = Path(path)
+        self.bridge.action("open_project", path=str(path))
         manifest = core.load_json(path / "manifest.json")
         if not manifest:
             return messagebox.showerror("Не проект", f"В {path} нет manifest.json")
@@ -638,6 +704,10 @@ class App(tk.Tk):
                       if self.issues else "Проверка")
 
     def _poll(self):
+        try:
+            self.bridge.poll()                      # состояние для ассистента и его команды
+        except Exception as e:
+            self.bridge.action("bridge_error", error=str(e))
         if self.project:
             p = self.project / "netlist.json"
             m = p.stat().st_mtime if p.exists() else None
@@ -947,6 +1017,7 @@ class App(tk.Tk):
             except Exception as e:
                 return messagebox.showwarning("Исправить деталь", str(e), parent=win)
             teach.save_netlist(self.project, self.netlist)
+            self.bridge.action("edit_component", ref=ref, new_ref=new_ref, type=new_type, value=v_val.get().strip())
             report = teach.teach(self.project, c, new_type, new_ref, ref)
             win.destroy()
             self.load_netlist()

@@ -9,3 +9,5 @@ learned/repairs.jsonl
 learned/sim_stats.json
 learned/parts_user.json
 learned/guard.json
+session/
+.mcp.json
