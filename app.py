@@ -89,6 +89,7 @@ class App(tk.Tk):
         ttk.Button(bar, text="Netlist без ИИ", command=self.run_autonet).pack(side="left")
         ttk.Button(bar, text="Задание для Claude", command=self.copy_task).pack(side="left")
         ttk.Button(bar, text="Экспорт", command=self.export).pack(side="left", padx=4)
+        ttk.Button(bar, text="Печатная плата", command=self.run_pcb).pack(side="left")
         ttk.Button(bar, text="Папка проекта", command=self.open_folder).pack(side="left")
         ttk.Button(bar, text="Дообучить", command=self.train).pack(side="left", padx=4)
 
@@ -418,6 +419,51 @@ class App(tk.Tk):
             where = "netlist_autonet.json (проверенный netlist.json не тронут)"
         self.status.set(f"Netlist без ИИ: деталей {n}, с прочитанным обозначением {named}, с номиналом {vals} → {where}. "
                         "Это черновик: сверяйте по картинке или отдайте Claude на доработку.")
+
+    def run_pcb(self):
+        """Печатная плата по netlist.json (или схема соединений щита для релейно-контакторной схемы)."""
+        if not self.project or not self.netlist:
+            return messagebox.showinfo("Печатная плата", "Нужен netlist.json: сначала распознайте схему.")
+        low = [c["ref"] for c in self.netlist.get("components", []) if c.get("confidence") == "low"]
+        if len(low) > 0.3 * max(1, len(self.netlist.get("components", []))):
+            if not messagebox.askyesno("Печатная плата", f"В netlist {len(low)} деталей с низкой уверенностью — "
+                                       "плата повторит ошибки распознавания. Всё равно строить?"):
+                return
+        self.status.set("Печатная плата: посадочные места и расстановка…")
+
+        def work():
+            try:
+                import pcb
+                res = pcb.make(self.project, progress=lambda m: self.after(0, self.status.set, f"Печатная плата: {m}…"))
+                self.after(0, self._pcb_done, res)
+            except Exception as e:
+                self.after(0, self.status.set, f"Печатная плата не получилась: {e}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pcb_done(self, res):
+        folder = Path(res["dir"])
+        if res["mode"] == "wiring":
+            self.status.set(f"Схема почти вся — аппараты щита ({res['panel_share']:.0%}): плата не нужна. "
+                            f"Схема соединений: {res['wires']} проводов → pcb/wiring.md")
+            os.startfile(folder / "wiring.md")
+            return
+        W, H = res["board"]
+        self.status.set(f"Плата {W:.0f}×{H:.0f} мм: деталей {res['parts']}, дорожек {res['tracks']}, "
+                        f"переходных {res['vias']}, не разведено {res['unrouted']} → папка pcb (Gerber, сверловка, отчёт)")
+        win = tk.Toplevel(self)
+        win.title(f"Печатная плата — {self.project.name}")
+        img = Image.open(folder / "board.png")
+        img.thumbnail((1200, 800))
+        photo = ImageTk.PhotoImage(img)
+        lbl = ttk.Label(win, image=photo)
+        lbl.image = photo
+        lbl.pack()
+        row = ttk.Frame(win)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text=f"{W:.0f}×{H:.0f} мм · синий — нижний слой, красный — верхний, зелёные — переходные, "
+                            f"красный пунктир — не разведено ({res['unrouted']})").pack(side="left", padx=6)
+        ttk.Button(row, text="Отчёт", command=lambda: os.startfile(folder / "report.md")).pack(side="right", padx=4)
+        ttk.Button(row, text="Папка с Gerber", command=lambda: os.startfile(folder)).pack(side="right")
 
     def train(self, project=None, quiet=False):
         """Дообучение в отдельном процессе, чтобы окно не зависало."""
