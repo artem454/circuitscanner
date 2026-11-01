@@ -22,6 +22,7 @@ import json
 import math
 import re
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -256,12 +257,13 @@ def body_box(p, x, y, rot, margin=1.27):
 
 # ---------- расстановка ----------
 
-def place(P, W=None, H=None):
-    """Жадная расстановка по длине связей. Возвращает (ширина, высота, {ref: (x, y, rot)})."""
+def place(P, W=None, H=None, factor=1.35):
+    """Расстановка по длине связей. factor — запас площади платы над площадью деталей.
+    Возвращает (ширина, высота, {ref: (x, y, rot)})."""
     area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in (body_box(p, 0, 0, 0) for p in P.values()))
     if not W:
-        W = math.ceil(math.sqrt(area * 1.35 * 1.4) / MIL) * MIL
-        H = math.ceil(area * 1.35 / W / MIL) * MIL
+        W = math.ceil(math.sqrt(area * factor * 1.4) / MIL) * MIL
+        H = math.ceil(area * factor / W / MIL) * MIL
         # разъёмы стоят по периметру — периметр должен вместить их длину
         edge_len = sum(body_box(p, 0, 0, 90)[3] - body_box(p, 0, 0, 90)[1] for p in P.values() if p.get("edge"))
         while 2 * (W + H) * 0.8 < edge_len:
@@ -317,36 +319,36 @@ def _try_place(P, W, H):
             if net:
                 nets_pins.setdefault(net, []).append((px, py))
     rest = [r for r in P if r not in pos]
-    degree = {r: sum(len([q for q in P if net in P[q]["pins"].values()]) for net in P[r]["pins"].values()) for r in rest}
-    rest.sort(key=lambda r: (-degree[r], r))
-    step = MIL
-    for r in rest:
-        best = None
-        for rot in (0, 90):
-            b0 = body_box(P[r], 0, 0, rot)
-            xs = np.arange(-b0[0] + 0.5, W - b0[2] - 0.5, step)
-            ys = np.arange(-b0[1] + 0.5, H - b0[3] - 0.5, step)
-            if not len(xs) or not len(ys):
+    # шины с множеством выводов (GND, питание) есть везде — расстановку по ним не тянем
+    fan = {}
+    for p in P.values():
+        for n in set(p["pins"].values()):
+            fan[n] = fan.get(n, 0) + 1
+    big = {n for n, k in fan.items() if k > 10}
+    links = {r: {n for n in P[r]["pins"].values() if n and n not in big} for r in P}
+
+    def pins_of(exclude=None):
+        acc = {}
+        for q, (x, y, rot) in pos.items():
+            if q == exclude:
                 continue
-            X, Y = np.meshgrid(xs, ys)
-            X, Y = X.ravel(), Y.ravel()
-            ok = np.ones(len(X), bool)
-            if boxes:
-                B = np.array(boxes)
-                ok = ~(((X[:, None] + b0[0]) < B[None, :, 2]) & ((X[:, None] + b0[2]) > B[None, :, 0]) &
-                       ((Y[:, None] + b0[1]) < B[None, :, 3]) & ((Y[:, None] + b0[3]) > B[None, :, 1])).any(1)
-            if not ok.any():
-                continue
-            X, Y = X[ok], Y[ok]
-            cost = 0.02 * (np.abs(X - W / 2) + np.abs(Y - H / 2))
-            for pd, px, py in pad_positions(P[r], 0, 0, rot):
-                pts = nets_pins.get(P[r]["pins"].get(pd["name"]))
-                if pts:
-                    Q = np.array(pts)
-                    cost = cost + (np.abs(X[:, None] + px - Q[None, :, 0]) + np.abs(Y[:, None] + py - Q[None, :, 1])).min(1)
-            k = int(np.argmin(cost))
-            if best is None or cost[k] < best[0]:
-                best = (float(cost[k]), float(X[k]), float(Y[k]), rot)
+            for pd, px, py in pad_positions(P[q], x, y, rot):
+                n = P[q]["pins"].get(pd["name"])
+                if n and n not in big:
+                    acc.setdefault(n, []).append((px, py))
+        return acc
+
+    # порядок связей: следующей ставится деталь с наибольшим числом связей с уже поставленными
+    placed_nets = {n for q in pos for n in links[q]}
+    order = []
+    left = set(rest)
+    while left:
+        r = max(left, key=lambda q: (len(links[q] & placed_nets), len(links[q]), q))
+        order.append(r)
+        left.discard(r)
+        placed_nets |= links[r]
+    for r in order:
+        best = _best_spot(P, r, W, H, boxes, nets_pins, big)
         if best is None:
             return None
         _, x, y, rot = best
@@ -356,7 +358,61 @@ def _try_place(P, W, H):
             net = P[r]["pins"].get(pd["name"])
             if net:
                 nets_pins.setdefault(net, []).append((px, py))
+    # доводка: деталь снимается и ставится в лучшее место при всех остальных — уходят далёкие выбросы
+    for _ in range(3):
+        moved = 0
+        for r in order:
+            others = [body_box(P[q], *pos[q]) for q in pos if q != r]
+            np_ = pins_of(exclude=r)
+            cur = _spot_cost(P, r, *pos[r], np_, W, H)
+            best = _best_spot(P, r, W, H, others, np_, big)
+            if best and best[0] < cur - 1.0:
+                pos[r] = (round(best[1] / G) * G, round(best[2] / G) * G, best[3])
+                moved += 1
+        if not moved:
+            break
     return pos
+
+
+def _spot_cost(P, r, x, y, rot, nets_pins, W, H):
+    cost = 0.02 * (abs(x - W / 2) + abs(y - H / 2))
+    for pd, px, py in pad_positions(P[r], x, y, rot):
+        pts = nets_pins.get(P[r]["pins"].get(pd["name"]))
+        if pts:
+            cost += min(abs(px - qx) + abs(py - qy) for qx, qy in pts)
+    return cost
+
+
+def _best_spot(P, r, W, H, boxes, nets_pins, big=()):
+    """Лучшее свободное место детали r: сумма расстояний её выводов до выводов тех же цепей."""
+    best = None
+    for rot in (0, 90):
+        b0 = body_box(P[r], 0, 0, rot)
+        xs = np.arange(-b0[0] + 0.5, W - b0[2] - 0.5, MIL)
+        ys = np.arange(-b0[1] + 0.5, H - b0[3] - 0.5, MIL)
+        if not len(xs) or not len(ys):
+            continue
+        X, Y = np.meshgrid(xs, ys)
+        X, Y = X.ravel(), Y.ravel()
+        ok = np.ones(len(X), bool)
+        if boxes:
+            B = np.array(boxes)
+            ok = ~(((X[:, None] + b0[0]) < B[None, :, 2]) & ((X[:, None] + b0[2]) > B[None, :, 0]) &
+                   ((Y[:, None] + b0[1]) < B[None, :, 3]) & ((Y[:, None] + b0[3]) > B[None, :, 1])).any(1)
+        if not ok.any():
+            continue
+        X, Y = X[ok], Y[ok]
+        cost = 0.02 * (np.abs(X - W / 2) + np.abs(Y - H / 2))
+        for pd, px, py in pad_positions(P[r], 0, 0, rot):
+            net = P[r]["pins"].get(pd["name"])
+            pts = nets_pins.get(net) if net not in big else None
+            if pts:
+                Q = np.array(pts)
+                cost = cost + (np.abs(X[:, None] + px - Q[None, :, 0]) + np.abs(Y[:, None] + py - Q[None, :, 1])).min(1)
+        k = int(np.argmin(cost))
+        if best is None or cost[k] < best[0]:
+            best = (float(cost[k]), float(X[k]), float(Y[k]), rot)
+    return best
 
 
 # ---------- схема соединений щита (когда плата не нужна) ----------
@@ -556,6 +612,9 @@ def route_board(P, pos, W, H, classes, attempts=3, progress=None):
                 m = 40
                 box = (max(0, min(ys) - m), min(R.ny - 1, max(ys) + m), max(0, min(xs) - m), min(R.nx - 1, max(xs) + m))
                 path = R.route(nid[n], list(tree), [(0, cy, cx), (1, cy, cx)], rad, box)
+                if path is None:                             # в окне не прошла — обход по всей плате
+                    path = R.route(nid[n], list(tree), [(0, cy, cx), (1, cy, cx)], rad,
+                                   (0, R.ny - 1, 0, R.nx - 1), limit=700000)
                 if path is None:
                     failed.append((n, pads[i]["ref"], pads[i]["pad"]["name"]))
                     continue
@@ -710,7 +769,46 @@ def drill_file(path, H, pads, vias):
     Path(path).write_text("\n".join(out) + "\n", encoding="ascii")
 
 
-def make(project, W=None, H=None, progress=None):
+HISTORY = Path(__file__).resolve().parent / "learned" / "pcb_history.jsonl"
+
+
+def signature(nl):
+    """Отпечаток netlist: детали, номиналы и соединения — меняется при любой правке схемы."""
+    import hashlib
+    rows = sorted(f"{c.get('ref')}|{c.get('type')}|{c.get('value')}|" +
+                  ",".join(f"{k}={v}" for k, v in sorted((c.get("pins") or {}).items()))
+                  for c in nl.get("components", []))
+    return hashlib.sha1("\n".join(rows).encode("utf-8")).hexdigest()[:16]
+
+
+def remember(sig, parts_n, factor, W, H, unrouted, vias, seconds):
+    HISTORY.parent.mkdir(exist_ok=True)
+    with open(HISTORY, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "sig": sig, "parts": parts_n, "factor": round(factor, 3),
+                            "board": [round(W, 1), round(H, 1)], "unrouted": unrouted, "vias": vias,
+                            "sec": round(seconds)}, ensure_ascii=False) + "\n")
+
+
+def learned_factor(parts_n, default=1.35):
+    """Запас площади по опыту: наименьший, при котором платы похожего размера разводились полностью."""
+    if not HISTORY.exists():
+        return default
+    ok, bad = [], []
+    for line in HISTORY.read_text(encoding="utf-8").splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if 0.6 * parts_n <= r["parts"] <= 1.6 * parts_n:
+            (ok if r["unrouted"] == 0 else bad).append(r["factor"])
+    if ok:
+        return min(ok)
+    if bad:                                           # полностью не разводилось — начать с большего запаса
+        return max(default, max(bad) * 1.12)
+    return default
+
+
+def make(project, W=None, H=None, progress=None, force=False, tries=3):
     """Плата (или схема соединений щита) по netlist.json проекта. Возвращает сводку."""
     project = Path(project)
     nl = core.load_json(project / "netlist.json")
@@ -732,9 +830,45 @@ def make(project, W=None, H=None, progress=None):
     if progress:
         progress("посадочные места и расстановка")
     P = build_parts(nl)
-    W, H, pos = place(P, W, H)
     classes = net_classes(nl)
-    pads, tracks, vias, failed = route_board(P, pos, W, H, classes, progress=progress)
+    sig = signature(nl)
+    ideal = core.load_json(out / "ideal.json")
+    if ideal and ideal.get("sig") == sig and not force and not W:
+        # тот же netlist уже разведён полностью — берём сохранённый идеал без пересчёта
+        if progress:
+            progress("идеальная плата для этого netlist уже есть — без пересчёта")
+        W, H = ideal["board"]
+        pos = {r: tuple(v) for r, v in ideal["pos"].items()}
+        tracks = [dict(t, pts=[tuple(p) for p in t["pts"]]) for t in ideal["tracks"]]
+        vias, failed = ideal["vias"], []
+        pads = []
+        for r, p in P.items():
+            for pd, x, y in pad_positions(p, *pos[r]):
+                pads.append({"ref": r, "pad": pd, "x": x, "y": y, "net": p["pins"].get(pd["name"])})
+        from_ideal = True
+    else:
+        from_ideal = False
+        factor = learned_factor(len(P))
+        best = None
+        for k in range(tries):                         # перерасчёт: не разведено — плата просторнее
+            if progress:
+                progress(f"расстановка (попытка {k + 1}/{tries}, запас площади ×{factor:.2f})")
+            t0 = time.time()
+            Wk, Hk, pos_k = place(P, W, H, factor=factor)
+            res = route_board(P, pos_k, Wk, Hk, classes, progress=progress)
+            remember(sig, len(P), factor, Wk, Hk, len(res[3]), len(res[2]), time.time() - t0)
+            key = (len(res[3]), Wk * Hk)
+            if best is None or key < best[0]:
+                best = (key, Wk, Hk, pos_k, res)
+            if not res[3] or W:
+                break
+            factor *= 1.12
+        _, W, H, pos, (pads, tracks, vias, failed) = best
+        if not failed:                                 # разведено всё — запомнить как идеал
+            (out / "ideal.json").write_text(json.dumps(
+                {"sig": sig, "board": [W, H], "pos": {r: list(v) for r, v in pos.items()},
+                 "tracks": tracks, "vias": vias, "saved": time.strftime("%Y-%m-%d %H:%M:%S")},
+                ensure_ascii=False), encoding="utf-8")
     if progress:
         progress("Gerber, сверловка, картинка")
     render_png(out / "board.png", W, H, P, pos, pads, tracks, vias, failed)
@@ -756,7 +890,9 @@ def make(project, W=None, H=None, progress=None):
     nets_total = len({pd["net"] for pd in pads if pd["net"]})
     md = [f"# Печатная плата: {nl.get('title', '')}", "",
           f"Размер {W:.1f} × {H:.1f} мм, деталей {len(P)}, цепей {nets_total}, дорожек {len(tracks)}, "
-          f"переходных {len(vias)}, не разведено связей: {len(failed)}.", "",
+          f"переходных {len(vias)}, не разведено связей: {len(failed)}." +
+          (" Взята сохранённая идеальная плата (netlist не менялся)." if from_ideal else
+           " Плата разведена полностью — сохранена как идеал (pcb/ideal.json)." if not failed else ""), "",
           "Нижний слой — основной (выводной монтаж), верхний — перемычки. Силовые цепи 1,2–2 мм, высоковольтные "
           "с зазором 2,5 мм. Файлы для производства: *.gbr (RS-274X) и drill.drl (Excellon).", ""]
     if failed:
@@ -771,7 +907,7 @@ def make(project, W=None, H=None, progress=None):
     md += [f"| {r} | {P[r]['value']} | {P[r]['fp']['note']} |" for r in P]
     (out / "report.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     return {"mode": "pcb", "board": [W, H], "parts": len(P), "tracks": len(tracks), "vias": len(vias),
-            "unrouted": len(failed), "dir": str(out)}
+            "unrouted": len(failed), "dir": str(out), "ideal": from_ideal or not failed}
 
 
 if __name__ == "__main__":

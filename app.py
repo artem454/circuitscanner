@@ -132,6 +132,17 @@ class App(tk.Tk):
         self.var_only_low = tk.BooleanVar(value=False)
         ttk.Checkbutton(crow, text="только сомнения", variable=self.var_only_low,
                         command=self._fill_lists).pack(side="left", padx=6)
+        srow = ttk.Frame(self.tv_comp.master)
+        srow.pack(side="top", fill="x", before=self.tv_comp)
+        ttk.Label(srow, text="Поиск:").pack(side="left", padx=(2, 4))
+        self.var_find = tk.StringVar()
+        ent = ttk.Entry(srow, textvariable=self.var_find)
+        ent.pack(side="left", fill="x", expand=True, padx=(0, 2), pady=2)
+        self.var_find.trace_add("write", lambda *a: self._fill_lists())
+        ent.bind("<Return>", lambda e: self._find_first())
+        ent.bind("<Escape>", lambda e: self.var_find.set(""))
+        self.lbl_found = ttk.Label(srow, text="", foreground="#777")
+        self.lbl_found.pack(side="left", padx=4)
         self.tv_comp.bind("<Double-1>", lambda e: self.edit_comp())
         self.tv_comp.bind("<Motion>", self._comp_tip)
         self.tv_comp.bind("<Leave>", lambda e: self._hide_tip())
@@ -496,8 +507,9 @@ class App(tk.Tk):
         ttk.Button(row2, text="Папка журнала", command=lambda: os.startfile(bridge.SESSION)).pack(side="left", padx=4)
         ttk.Label(win, textvariable=res, wraplength=560, foreground="#1565c0", padding=10).pack(anchor="w")
 
-    def run_pcb(self):
-        """Печатная плата по netlist.json (или схема соединений щита для релейно-контакторной схемы)."""
+    def run_pcb(self, force=False):
+        """Печатная плата по netlist.json (или схема соединений щита для релейно-контакторной схемы).
+        force — пересчитать заново, даже если для этого netlist уже есть идеальная плата."""
         self.bridge.action("run_pcb")
         if not self.project or not self.netlist:
             return messagebox.showinfo("Печатная плата", "Нужен netlist.json: сначала распознайте схему.")
@@ -506,7 +518,8 @@ class App(tk.Tk):
         def work():
             try:
                 import pcb
-                res = pcb.make(self.project, progress=lambda m: self.after(0, self.status.set, f"Печатная плата: {m}…"))
+                res = pcb.make(self.project, force=force,
+                               progress=lambda m: self.after(0, self.status.set, f"Печатная плата: {m}…"))
                 self.after(0, self._pcb_done, res)
             except Exception as e:
                 self.after(0, self.status.set, "Печатная плата не построена")
@@ -537,6 +550,10 @@ class App(tk.Tk):
                             f"красный пунктир — не разведено ({res['unrouted']})").pack(side="left", padx=6)
         ttk.Button(row, text="Отчёт", command=lambda: os.startfile(folder / "report.md")).pack(side="right", padx=4)
         ttk.Button(row, text="Папка с Gerber", command=lambda: os.startfile(folder)).pack(side="right")
+        ttk.Button(row, text="Пересчитать заново", command=lambda: (win.destroy(), self.run_pcb(force=True))
+                   ).pack(side="right", padx=4)
+        if res.get("ideal"):
+            ttk.Label(row, text="★ идеал: разведено всё, ядро запомнило", foreground="#2e7d32").pack(side="left", padx=6)
 
     def train(self, project=None, quiet=False):
         """Дообучение в отдельном процессе, чтобы окно не зависало."""
@@ -687,12 +704,19 @@ class App(tk.Tk):
     def _fill_lists(self):
         for tv in (self.tv_comp, self.tv_net, self.tv_issue, self.tv_block):
             tv.delete(*tv.get_children())
+        q = self.var_find.get().strip().lower() if getattr(self, "var_find", None) else ""
+        shown = 0
         for ref, c in sorted(self.comps.items(), key=lambda kv: _natural(kv[0])):
             if getattr(self, "var_only_low", None) and self.var_only_low.get() and c.get("confidence") != "low":
                 continue
+            if q and not self._comp_matches(ref, c, q):
+                continue
+            shown += 1
             self.tv_comp.insert("", "end", iid=ref, values=(ref, core.type_label(c.get("type", "")), c.get("value", ""),
                                                            c.get("cell", "")),
                                 tags=("low",) if c.get("confidence") == "low" else ())
+        if getattr(self, "lbl_found", None):
+            self.lbl_found.config(text=f"найдено {shown} из {len(self.comps)}" if q else "")
         meta = self.netlist.get("nets", {})
         for net, conns in sorted(self.nets.items(), key=lambda kv: _natural(kv[0])):
             self.tv_net.insert("", "end", iid=net, values=(net, len(conns), meta.get(net, {}).get("label", "")))
@@ -962,6 +986,47 @@ class App(tk.Tk):
         self.hl_cells = self._cells_of([ref])
         self._set_detail(self._comp_text(ref))
         self._focus_cells()
+
+    @staticmethod
+    def _comp_matches(ref, c, q):
+        """Поиск: каждое слово запроса — в обозначении, типе (рус./лат.), названии, номинале, клетке или примечании."""
+        t = c.get("type", "")
+        hay = " ".join([ref, t, core.type_label(t), core.type_name(t), core.type_gost(t), str(c.get("value", "")),
+                        str(c.get("cell", "")), str(c.get("note", "")),
+                        "сомнение" if c.get("confidence") == "low" else ""]).lower()
+        codes = App._type_codes()
+
+        def num(v):                                      # «4,7мк» = «4.7u», «10к» = «10k»
+            return v.replace(",", ".").replace("мк", "u").replace("µ", "u").replace("к", "k").replace("м", "m") \
+                .replace("н", "n").replace("п", "p")
+        hay += " " + num(str(c.get("value", "")).lower())
+        for w in q.split():
+            if w[:1].isdigit():
+                w = num(w)
+            if w in codes:                               # «тр», «д», «q», «vt» — именно этот тип
+                if t not in codes[w]:
+                    return False
+            elif w not in hay:
+                return False
+        return True
+
+    @staticmethod
+    def _type_codes():
+        if not hasattr(App, "_codes"):
+            codes = {}
+            for t, (ru, _name, gost) in core.TYPE_RU.items():
+                for k in [ru, t, core.type_label(t)] + gost.split("/"):
+                    if k and k not in ("—", "?"):
+                        codes.setdefault(k.lower(), set()).add(t)
+            App._codes = codes
+        return App._codes
+
+    def _find_first(self):
+        items = self.tv_comp.get_children()
+        if items:
+            self.tv_comp.selection_set(items[0])
+            self.tv_comp.see(items[0])
+            self.on_comp()
 
     def _comp_tip(self, e):
         """Подсказка при наведении на деталь в списке: что это за деталь."""
