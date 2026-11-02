@@ -1,6 +1,7 @@
-"""Эталоны условных обозначений из библиотек САПР (Altium Designer .SchLib).
+"""Эталоны условных обозначений из библиотек САПР (Altium Designer .SchLib, sPlan 8 .lib).
 
     python libsyms.py altium папка_SchLib [--show файл.png]   — извлечь, показать сводку и добавить в обучение
+    python libsyms.py splan папка_lib [--show файл.png]       — то же для библиотеки sPlan (ГОСТ)
 
 Как читается: .SchLib — составной файл OLE, внутри записи вида «|RECORD=13|Location.X=…|Corner.X=…|».
 Берутся линии (13), ломаные (6), многоугольники (7), прямоугольники (14), дуги (12, 11) и эллипсы (8)
@@ -145,6 +146,73 @@ def render(prims, size=160, pad=6, body_prims=None):
     return img, [a0, b0, a1, b1]
 
 
+# --- sPlan 8 (.lib): двоичный формат. Каждая фигура — заголовок в 24 байта: тип, 00, флаг, 04,
+# 11 байт, цвет заливки (3 байта), 6 нулей; дальше точки float32 (x, y). 04 — ломаная и 05 — залитый
+# многоугольник: число отрезков n, затем n+1 точек; 01 — окружность/дуга, тоже как ломаная (n, n+1
+# точек); 02 — прямоугольник, 5 точек. Надписи (обозначение, номинал) пропускаются. Компонент
+# заканчивается признаком 01 01 01 01 и своим названием (UTF-16 с длиной), фигуры до него — его.
+_SPLAN_HDR = re.compile(rb"([\x01\x02\x04\x05])\x00[\x00\x01]\x04[\x00-\xff]{11}[\x00-\xff]{3}\x00{6}", re.S)
+_SPLAN_NAME = re.compile(rb"\x01\x01\x01\x01([\x01-\x50])\x00\x00\x00", re.S)
+
+
+def _pts(data, pos, n):
+    import struct
+    if pos + 8 * n > len(data):
+        return None
+    v = struct.unpack_from(f"<{2 * n}f", data, pos)
+    if not all(abs(t) < 20000 for t in v):
+        return None
+    return [(v[2 * i], -v[2 * i + 1]) for i in range(n)]          # в sPlan ось Y вниз
+
+
+def parse_splan(path):
+    """[(название компонента, [примитивы])] из библиотеки sPlan."""
+    import struct
+    data = Path(path).read_bytes()
+    names = []
+    for m in _SPLAN_NAME.finditer(data):
+        n = m.group(1)[0]
+        s = data[m.end():m.end() + 2 * n]
+        try:
+            names.append((m.start(), s.decode("utf-16-le")))
+        except UnicodeDecodeError:
+            pass
+    comps, prev = [], 0
+    for end, name in names:
+        prims = []
+        for h in _SPLAN_HDR.finditer(data, prev, end):
+            t, p = h.group(1)[0], h.end()
+            if t == 2:
+                pts = _pts(data, p, 5)
+            else:
+                cnt = struct.unpack_from("<I", data, p)[0]
+                pts = _pts(data, p + 4, cnt + 1) if 1 <= cnt <= 200 else None
+            if pts:
+                prims.append(("poly" if t == 5 else "line", pts))
+        if prims:
+            comps.append((name, prims))
+        prev = end
+    return comps
+
+
+def splan_items(root):
+    """Компоненты из папки библиотек sPlan → [{"img", "body", "type", "name"}]; тип — по названию
+    компонента (pdfsyms.name_type), неопознанные пропускаются."""
+    import pdfsyms
+    items, per_type = [], {}
+    for f in sorted(Path(root).rglob("*.lib")):
+        for name, prims in parse_splan(f):
+            typ = pdfsyms.name_type(name)
+            if not typ or typ in ("PORT", "GND") or "RGB" in name:
+                continue                                 # RGB-светодиод в библиотеке — составной, читается обрывками
+            per_type[typ] = per_type.get(typ, 0) + 1
+            if per_type[typ] > 6:
+                continue                                 # 17 резисторов разной мощности перекосили бы обучение
+            img, body = render(prims, body_prims=prims)
+            items.append({"img": img, "body": body, "type": typ, "name": f"{f.stem}/{name}"})
+    return items
+
+
 def altium_items(root):
     """Все компоненты известных типов из папки с .SchLib → [{"img", "type", "name"}]."""
     items = []
@@ -163,14 +231,15 @@ def altium_items(root):
 
 if __name__ == "__main__":
     import pdfsyms
-    if sys.argv[1:2] != ["altium"] or len(sys.argv) < 3:
+    if sys.argv[1:2] not in (["altium"], ["splan"]) or len(sys.argv) < 3:
         print(__doc__)
         sys.exit(1)
-    items = altium_items(sys.argv[2])
+    src = sys.argv[1]
+    items = altium_items(sys.argv[2]) if src == "altium" else splan_items(sys.argv[2])
     from collections import Counter
     print("символов:", len(items), dict(Counter(i["type"] for i in items)))
     if "--show" in sys.argv:
         pdfsyms.contact_sheet(items, sys.argv[sys.argv.index("--show") + 1])
         print("лист символов:", sys.argv[sys.argv.index("--show") + 1])
     else:
-        print("добавлено в обучение:", pdfsyms.add_to_training(items, per=24, src="altium"))
+        print("добавлено в обучение:", pdfsyms.add_to_training(items, per=24, src=src))
