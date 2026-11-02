@@ -94,8 +94,7 @@ class App(tk.Tk):
         ttk.Button(bar, text="Печатная плата", command=self.run_pcb).pack(side="left")
         ttk.Button(bar, text="Ассистент", command=self.assistant).pack(side="left", padx=4)
         ttk.Button(bar, text="Папка проекта", command=self.open_folder).pack(side="left")
-        ttk.Button(bar, text="Лист проверен", command=self.mark_verified).pack(side="left", padx=4)
-        ttk.Button(bar, text="Дообучить", command=self.train).pack(side="left")
+        ttk.Button(bar, text="Дообучить", command=self.train).pack(side="left", padx=4)
 
         self.status = tk.StringVar(value="Откройте картинку схемы или папку проекта.")
         ttk.Label(self, textvariable=self.status, anchor="w", relief="sunken",
@@ -130,6 +129,8 @@ class App(tk.Tk):
         crow = ttk.Frame(self.tv_comp.master)
         crow.pack(side="top", fill="x", before=self.tv_comp)
         ttk.Button(crow, text="Исправить деталь…", command=self.edit_comp).pack(side="left", padx=2, pady=2)
+        # рядом со списком деталей: на верхней панели кнопка уходила за край окна
+        ttk.Button(crow, text="✔ Лист проверен", command=self.mark_verified).pack(side="right", padx=2, pady=2)
         self.var_only_low = tk.BooleanVar(value=False)
         ttk.Checkbutton(crow, text="только сомнения", variable=self.var_only_low,
                         command=self._fill_lists).pack(side="left", padx=6)
