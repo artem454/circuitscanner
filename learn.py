@@ -617,6 +617,35 @@ def _cell_xy(cell):
     return col - 1, int(m.group(2)) - 1
 
 
+def _examples_by_box(parts, res):
+    """Лист с рамками деталей (netlist после проверки): символ анализатора получает тип детали, рамку
+    которой он задевает — ровно одной; символ далеко от всех деталей — «не деталь» (OTHER). Символ
+    у корпуса микросхемы или разъёма — скорее обрывок ножек/надписей, его не размечаем."""
+    boxes = []
+    for c in parts:
+        for b in (c.get("section_boxes") or {"": c["box"]}).values():
+            boxes.append((b, TYPE_MAP.get(c.get("type", "X"), "OTHER")))
+    sw = res.get("stroke", 2)
+    X, y, Cr = [], [], []
+    for sy, f, cr in zip(res["symbols"], res["_features"], res["_crops"]):
+        if sy["kind"] in ("R", "U", "GND", "PORT"):
+            continue
+        x0, y0, x1, y1 = sy["box"]
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        hit, near = [], False
+        for b, cls in boxes:
+            pad = 0.25 * max(b[2] - b[0], b[3] - b[1])
+            if b[0] - pad <= cx <= b[2] + pad and b[1] - pad <= cy <= b[3] + pad:
+                hit.append(cls)
+            if analyzer.box_dist(b, cx, cy) <= 6 * sw + pad:
+                near = True
+        if len(hit) == 1 and hit[0] not in ("U", "MCU", "TERM", "PORT", "OTHER"):
+            X.append(f); y.append(hit[0]); Cr.append(cr)
+        elif not hit and not near:
+            X.append(f); y.append("OTHER"); Cr.append(cr)
+    return X, y, Cr
+
+
 def real_examples(project, res=None):
     """Примеры символов с проверенного листа. Клетки netlist.json приблизительны, поэтому:
     «не деталь» (OTHER) — символ, рядом с которым (его клетки и соседние) по ответу нет ни одной
@@ -625,6 +654,9 @@ def real_examples(project, res=None):
     nl = core.load_json(project / "netlist.json")
     cell = core.load_json(project / "manifest.json")["grid"]["cell"]
     res = res or analyzer.analyze(project, ocr=False)
+    parts = [c for c in nl.get("components", []) if c.get("type") not in ("GND", "PORT")]
+    if parts and all(c.get("box") for c in parts):
+        return _examples_by_box(parts, res)
     comps = {}
     for c in nl.get("components", []):
         cls = TYPE_MAP.get(c.get("type", "X"), "OTHER")
