@@ -573,6 +573,7 @@ class App(tk.Tk):
                                            stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
         self.status.set("Обучение: " + ("добавляю проверенную схему в примеры…" if project else
                                         "проекты → классификатор символов → параметры (несколько минут)…"))
+        self.train_manual = project is None
         self.after(2000, self._train_wait)
 
     def _train_wait(self):
@@ -584,7 +585,9 @@ class App(tk.Tk):
         except Exception:
             last = []
         self.status.set("Обучение завершено. " + (last[0] if last else ""))
-        self.generation(force=True)                  # после ручного дообучения — новое поколение
+        if getattr(self, "train_manual", True):
+            self.generation(force=True)              # после «Дообучить» — новое поколение; после «Лист проверен» —
+                                                     # нет: поколение идёт ~10 мин и обрывается при закрытии окна
 
     def mark_verified(self):
         """Учебным примером лист становится только после явного подтверждения: все детали, обозначения,
