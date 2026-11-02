@@ -909,11 +909,24 @@ class App(tk.Tk):
                                    fill="#c62828", font=("Segoe UI", fs))
 
         if self.var_marks.get() and self.comps:
-            by_cell = {}
+            by_cell, owner = {}, {}
+            gc = g["cell"]
             for ref, comp in self.comps.items():
+                if comp.get("section_boxes"):
+                    # микросхема из блоков: на плате одна деталь, на схеме метка у каждого блока (DA1.1, DA1.2)
+                    for s, b in comp["section_boxes"].items():
+                        lab = f"{ref}.{s}"
+                        by_cell.setdefault((int((b[0] + b[2]) / 2 // gc), int((b[1] + b[3]) / 2 // gc)), []).append(lab)
+                        owner[lab] = ref
+                    continue
                 pc = core.parse_cell(comp.get("cell", ""))
                 if pc:
                     by_cell.setdefault(pc, []).append(ref)
+            for s in (self.netlist or {}).get("power_symbols", []):   # знаки земли и питания — подписи цепей
+                b = s["box"]
+                lab = s.get("net") or s.get("type", "GND")
+                by_cell.setdefault((int((b[0] + b[2]) / 2 // gc), int((b[1] + b[3]) / 2 // gc)), []).append(lab)
+                owner[lab] = None
             fs = max(7, min(13, int(g["cell"] * self.zoom / 9)))
             line_h = fs * 1.6
             for (c, r), refs in by_cell.items():
@@ -922,9 +935,12 @@ class App(tk.Tk):
                 refs.sort(key=_natural)
                 shown = refs if len(refs) <= fit_n else refs[:fit_n - 1] + [f"+{len(refs) - fit_n + 1}"]
                 for i, ref in enumerate(shown):
-                    hl = ref in self.hl_refs
-                    low = self.comps.get(ref, {}).get("confidence") == "low"
+                    base = owner.get(ref, ref)
+                    hl = base in self.hl_refs
+                    low = self.comps.get(base, {}).get("confidence") == "low"
                     color = "#d50000" if hl else ("#e65100" if low else "#1565c0")
+                    if ref in owner and owner[ref] is None:
+                        color = "#616161"                         # знак земли/питания
                     t = cv.create_text(x1 - 3, y0 + line_h * (i + 1), text=ref, anchor="e", fill="white",
                                        font=("Segoe UI", fs, "bold"))
                     bb = cv.bbox(t)
