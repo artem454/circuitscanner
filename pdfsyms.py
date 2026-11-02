@@ -150,6 +150,9 @@ def _render(item, rng):
     canvas = np.full((g.shape[0] + 2 * pad, g.shape[1] + 2 * pad), 255, np.uint8)
     canvas[pad:pad + g.shape[0], pad:pad + g.shape[1]] = np.minimum(canvas[pad:pad + g.shape[0], pad:pad + g.shape[1]], g)
     body = [pad, pad, pad + g.shape[1], pad + g.shape[0]]
+    if item.get("body"):                                   # тело символа без дорисованных выводов (libsyms)
+        bx0, by0, bx1, by1 = item["body"]
+        body = [int(pad + bx0 * k), int(pad + by0 * k), int(pad + bx1 * k), int(pad + by1 * k)]
     rot = rng.choice((0, 1, 2, 3))
     if rot:
         h0, w0 = canvas.shape
