@@ -50,6 +50,10 @@ def _save(path, d):
 
 def add_from_analysis(project, res):
     """Символы разобранной схемы — в пул (новые; уже известные по месту не дублируются)."""
+    tests = json.loads((LEARNED / "test_sheets.json").read_text(encoding="utf-8")) \
+        if (LEARNED / "test_sheets.json").exists() else []
+    if str(Path(project).resolve()) in tests:
+        return                                           # тестовый лист в обучение не попадает
     path = _pool_file(project)
     old = _load(path)
     keys = set(old["key"].tolist()) if old else set()
@@ -151,6 +155,41 @@ def _overall(prec):
     return round(sum(p * c for p, c in prec.values()) / n, 3) if n else None
 
 
+def _hint_holdout(path):
+    """Каждая пятая схема пула — проверочная для подсказок по обозначениям: её подсказки никогда
+    не становятся метками, по ним меряется, стали ли модели точнее после поколения."""
+    import hashlib
+    return int(hashlib.md5(path.name.encode("utf-8")).hexdigest(), 16) % 5 == 0
+
+
+def _hints(d):
+    return d["hint"] if "hint" in d else np.array([""] * len(d["key"]))
+
+
+def hint_check(knn, shape, files, trusted):
+    """По подсказкам из обозначений (классы, прошедшие проверку на синтетике):
+    prec — точность уверенного согласия обеих моделей по каждому классу на всём пуле
+    (для допуска класса к меткам без подсказки); acc — доля проверочных подсказок, которые
+    модели называют так же (первый ответ kNN и модели формы), — общая точность «до/после»."""
+    cnt, hit = {}, {}
+    acc_n = acc_ok = 0
+    for path in files:
+        d = _load(path)
+        hints = _hints(d)
+        hold = _hint_holdout(path)
+        for i in np.flatnonzero(np.isin(hints, list(trusted))):
+            h = str(hints[i])
+            lab1, c1 = knn.predict(d["feat"][i].astype(np.float32))
+            lab2, p2 = shape.predict(d["crop"][i], d["dims"][i], trusted_only=False) if shape else (lab1, 1.0)
+            if hold:
+                acc_n += 2
+                acc_ok += (lab1 == h) + (lab2 == h)
+            if lab1 == lab2 and c1 >= KNN_CONF and p2 >= SHAPE_P and lab1 not in ("OTHER", "GND", "PORT"):
+                cnt[lab1] = cnt.get(lab1, 0) + 1
+                hit[lab1] = hit.get(lab1, 0) + (lab1 == h)
+    return {k: (hit[k] / cnt[k], cnt[k]) for k in cnt}, (round(acc_ok / acc_n, 3) if acc_n else None), acc_n // 2
+
+
 def run_generation(progress=None, retrain=True):
     import analyzer
     import learn
@@ -162,18 +201,28 @@ def run_generation(progress=None, retrain=True):
     st = _state()
     g = len(st["history"]) + 1
     # отпечаток данных: схемы в пуле, ваши правки, все примеры — без новых данных повтор отклонённого бессмыслен
+    import reflabels
     finger = [len(files), sum(int((_load(f)["status"] == "user").sum()) for f in files),
-              int(np.load(LEARNED / "symbols.npz")["y"].shape[0]) if (LEARNED / "symbols.npz").exists() else 0]
+              int(np.load(LEARNED / "symbols.npz")["y"].shape[0]) if (LEARNED / "symbols.npz").exists() else 0,
+              sum(int((_hints(_load(f)) != "").sum()) for f in files)]
     if st["history"] and st["history"][-1].get("rejected") and st["history"][-1].get("data") == finger:
         say("новых схем и правок нет — прошлое поколение отклонено, повтор не нужен")
         return None
     knn = analyzer.SymbolModel()
     shape = symclass.Model() if symclass.MODEL.exists() else None
-    say(f"поколение {g}: проверка классов на проверенных листах")
+    trusted = reflabels.trusted_classes()                # классы, чьим подсказкам по обозначениям можно верить
+    say(f"поколение {g}: проверка классов на проверенных листах и по обозначениям на схемах")
     prec = validate(knn, shape)
-    allowed = {k for k, (p, n) in prec.items() if n >= GATE_MIN and p >= GATE_PREC}   # только доказанно точные классы
-    blocked = set(prec) - allowed
+    hprec, hacc_before, hacc_n = hint_check(knn, shape, files, trusted)
+    # класс допущен к меткам без подсказки, если доказал точность на проверенных листах или по обозначениям;
+    # но если проверенные листы говорят против (достаточно ответов, точность низкая) — нет
+    allowed = {k for k, (p, n) in prec.items() if n >= GATE_MIN and p >= GATE_PREC}
+    allowed |= {k for k, (p, n) in hprec.items() if n >= reflabels.HINT_MIN and p >= reflabels.HINT_PREC}
+    allowed -= {k for k, (p, n) in prec.items() if n >= GATE_MIN and p < GATE_PREC}
+    blocked = (set(prec) | set(hprec)) - allowed
     acc_before = _overall(validate(knn, shape, agree_only=True))
+    ver_n = sum(n for _, n in validate(knn, shape, agree_only=True).values())
+    by_hint = 0
     import shutil
     backup = {}                                          # для отката, если поколение ухудшит точность
     for f in (LEARNED / "symbols.npz", LEARNED / "symdata.npz", LEARNED / "symbol_mlp.npz"):
@@ -187,17 +236,29 @@ def run_generation(progress=None, retrain=True):
         say(f"поколение {g}: схема {fi + 1}/{len(files)}")
         d = _load(path)
         d["label"] = d["label"].astype("<U16")
+        hints = _hints(d)
+        hold = _hint_holdout(path)
         pool_backup[path] = (d["status"].copy(), d["label"].copy(), d["gen"].copy())
         for i in range(len(d["key"])):
             total += 1
             if d["status"][i] == "user":
                 user += 1
                 continue
+            h = str(hints[i]) if str(hints[i]) in trusted else ""
+            if h and hold:                               # проверочная подсказка — не метка
+                if d["status"][i] == "gen":
+                    d["status"][i], d["label"][i] = "unknown", ""
+                continue
             lab1, c1 = knn.predict(d["feat"][i].astype(np.float32))
-            ok = lab1 in allowed and c1 >= KNN_CONF
-            if ok and shape is not None:
-                lab2, p2 = shape.predict(d["crop"][i], d["dims"][i])
-                ok = lab2 == lab1 and p2 >= SHAPE_P
+            lab2, p2 = shape.predict(d["crop"][i], d["dims"][i], trusted_only=False) if shape is not None else (lab1, 1.0)
+            if h and (lab1 == h or lab2 == h):           # обозначение на схеме + согласие хотя бы одной модели
+                ok, lab1 = True, h
+                by_hint += 1
+            else:
+                ok = lab1 in allowed and c1 >= KNN_CONF and not h   # уверенные модели против обозначения — не метка
+                if ok and shape is not None:
+                    lab2, p2 = shape.predict(d["crop"][i], d["dims"][i])
+                    ok = lab2 == lab1 and p2 >= SHAPE_P
             if ok:
                 if d["status"][i] != "gen" or d["label"][i] != lab1:
                     new += d["status"][i] != "gen"
@@ -220,9 +281,14 @@ def run_generation(progress=None, retrain=True):
         symclass.save_model(net, meta)
     analyzer._MODEL.clear()
     say(f"поколение {g}: проверка точности после обучения")
-    acc_after = _overall(validate(analyzer.SymbolModel(), symclass.Model() if symclass.MODEL.exists() else None,
-                                  agree_only=True))
-    rejected = acc_before is not None and acc_after is not None and acc_after < acc_before - 0.005
+    knn2, shape2 = analyzer.SymbolModel(), symclass.Model() if symclass.MODEL.exists() else None
+    acc_after = _overall(validate(knn2, shape2, agree_only=True))
+    _, hacc_after, _ = hint_check(knn2, shape2, files, trusted)
+    # откат, если упала точность по проверочным обозначениям (их сотни) или заметно — на проверенных
+    # листах; допуск по проверенным листам тем шире, чем меньше на них ответов
+    tol = max(0.005, 1.0 / max(1, ver_n) ** 0.5)
+    rejected = (hacc_before is not None and hacc_after is not None and hacc_after < hacc_before - 0.005) or \
+        (acc_before is not None and acc_after is not None and acc_after < acc_before - tol)
     if rejected:                                         # точность упала — поколение откатить целиком
         for f, b in backup.items():
             shutil.copyfile(b, f)
@@ -237,8 +303,10 @@ def run_generation(progress=None, retrain=True):
            "user": user, "by_generation": gen, "unknown": total - user - gen, "new": new, "revoked": revoked,
            "resolved_pct": round(100 * (user + gen) / max(1, total), 1), "blocked": sorted(blocked),
            "precision_before": acc_before, "precision_after": acc_after, "rejected": bool(rejected),
-           "data": finger,
-           "class_precision": {k: round(p, 2) for k, (p, n) in sorted(prec.items())}}
+           "by_hint": by_hint, "hint_check_n": hacc_n, "hint_acc_before": hacc_before, "hint_acc_after": hacc_after,
+           "hint_classes": sorted(trusted), "data": finger,
+           "class_precision": {k: round(p, 2) for k, (p, n) in sorted(prec.items())},
+           "hint_class_precision": {k: [round(p, 2), n] for k, (p, n) in sorted(hprec.items())}}
     st["history"].append(row)
     st["pending"] = []
     GENS.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -15,3 +15,9 @@ learned/pcb_history.jsonl
 learned/pcb_affinity.json
 learned/pool/
 learned/generations.json
+# выученные модели — большие и меняются при каждом обучении; их копии — в ../резервные_копии
+learned/*.npz
+learned/*.bak
+learned/pool_test/
+learned/reflabels_check.json
+learned/test_sheets.json

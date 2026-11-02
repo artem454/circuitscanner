@@ -162,6 +162,41 @@ def chip(sh, cx, cy, n):
     return [x0, y0, x0 + w, y0 + h], pins
 
 
+GATE_PINS = [(1, 2, 3), (4, 5, 6), (9, 10, 8), (12, 13, 11)]   # 4×2И (К155ЛА3, 74HC00): входы, выход
+
+
+def logic_gate(sh, cx, cy, rng, sec):
+    """Логический элемент по ГОСТ: прямоугольник с «&», «1» или «=1», два входа слева, выход справа
+    (иногда с кружком инверсии); у выводов — номера выводов корпуса секции sec (0…3)."""
+    w, h = 40, 56
+    x0, y0 = cx - w // 2, cy - h // 2
+    sh.rect(x0, y0, x0 + w, y0 + h)
+    fn = rng.choice(["&", "&", "1", "=1"])
+    tw, th = sh.text_size(fn)
+    sh.text(fn, cx - tw / 2, y0 + th + 6)
+    inv = rng.random() < 0.6
+    a, b, o = GATE_PINS[sec]
+    pins = []
+    for name, y in ((a, cy - 14), (b, cy + 14)):
+        sh.line((x0, y), (x0 - 24, y))
+        pins.append({"name": str(name), "x": x0 - 24, "y": y, "bx": x0, "by": y})
+    xo = x0 + w
+    if inv:
+        r = 5
+        cv2.circle(sh.img, (int(xo + r), int(cy)), r, INK, max(1, sh.t - 1), cv2.LINE_AA)
+        xo += 2 * r
+    sh.line((xo, cy), (xo + 24, cy))
+    pins.append({"name": str(o), "x": xo + 24, "y": cy, "bx": xo, "by": cy})
+    if rng.random() < 0.7:                                # номера выводов мелко над ножками
+        small = max(0.3, sh.fscale * 0.6)
+        for p in pins:
+            s = p["name"]
+            (sw_, sh_), _ = cv2.getTextSize(s, sh.font, small, 1)
+            px = (p["x"] + p["bx"]) / 2 - sw_ / 2
+            cv2.putText(sh.img, s, (int(px), int(p["y"] - 4)), sh.font, small, INK, 1, cv2.LINE_AA)
+    return [x0, y0, xo, y0 + h], pins
+
+
 def opamp(sh, cx, cy, mirror):
     """Треугольник ОУ: входы «−» и «+» слева, выход справа (или зеркально)."""
     w, h = 64, 60
@@ -646,10 +681,15 @@ def generate(seed, hard=None, level=None):
         kinds += ["S"] * 4 + ["T"] * 3 + ["K"] * 2 + ["X"] * 2 + ["E"] * 3 + ["M"] * 1 + ["B"] * 3
     if rng.random() < 0.35:                                 # привод: энкодер, тахогенератор, датчики Холла
         kinds += ["N"] * 3 + ["V"] * 2 + ["H"] * 3
+    # логика: элементы И/ИЛИ/НЕ — секции DD3.1, DD3.2… одного корпуса. Решение — из своего генератора,
+    # чтобы прежние листы без логики остались теми же
+    if random.Random(seed * 7 + 3).random() < 0.3:
+        kinds += ["Z"] * 8
+    gates, chip_no = 0, 0
     cid = 0
     refs = {"R": "R", "C": "C", "D": "VD", "L": "L", "Q": "VT", "U": "DD", "G": "", "P": "", "A": "DA",
             "S": "BP", "T": "RK", "K": "BK", "X": "ZQ", "E": "HL", "M": "DD", "B": "XT",
-            "N": "BQ", "V": "BR", "H": "BH", "W": "K", "Y": "KM", "F": "HL", "O": "M"}
+            "N": "BQ", "V": "BR", "H": "BH", "W": "K", "Y": "KM", "F": "HL", "O": "M", "Z": "DD"}
     for r in range(rows):
         for c in range(cols):
             if rng.random() > lv["fill"]:
@@ -665,6 +705,12 @@ def generate(seed, hard=None, level=None):
                 box, pins = opamp(sh, cx, cy, rng.random() < 0.3)
             elif k == "U":
                 box, pins = chip(sh, cx, cy, rng.choice([4, 6, 8]))
+            elif k == "Z":
+                sec = gates % 4
+                if sec == 0:
+                    chip_no = cid + 1
+                gates += 1
+                box, pins = logic_gate(sh, cx, cy, rng, sec)
             elif k == "G":
                 box, pins = ground(sh, cx, cy)
             elif k == "S":
@@ -698,13 +744,15 @@ def generate(seed, hard=None, level=None):
             cid += 1
             typ = {"G": "GND", "P": "PORT", "Q": "Q", "U": "U", "A": "OPAMP", "S": "SENSOR", "T": "RT",
                    "K": "TC", "X": "XTAL", "E": "LED", "M": "MCU", "B": "TERM",
-                   "N": "ENC", "V": "TACHO", "H": "HALL", "O": "MOTOR"}.get(k, k)
+                   "N": "ENC", "V": "TACHO", "H": "HALL", "O": "MOTOR", "Z": "LOGIC"}.get(k, k)
             if k in "WYF":
                 typ = CTRL_TYPES[kd]
             comp = {"id": f"X{cid}", "type": typ, "box": [float(v) for v in box], "pins": pins, "kind": k}
+            if k == "Z":
+                comp["chip"] = f"DD{chip_no}"             # секции одного корпуса
             sh.comps.append(comp)
             if refs[k]:                                   # позиционное обозначение рядом
-                lab = f"{refs[k]}{cid}"
+                lab = f"{refs[k]}{cid}" if k != "Z" else f"DD{chip_no}.{sec + 1}"
                 tw, th = sh.text_size(lab)
                 tx, ty = box[0], box[1] - 6
                 if ty - th > 0 and sh.img[int(ty - th):int(ty), int(tx):int(tx + tw)].min() > 128:
@@ -732,8 +780,9 @@ def generate(seed, hard=None, level=None):
         for cp in list(free[:6]):
             if len(grp) > k:
                 break
-            if cp[0] is c0 and len(c0["pins"]) <= 2:
-                continue
+            if any(cp[0] is c for c, _ in grp):
+                continue                                  # выводы одной детали провод вдоль корпуса не соединяет:
+                                                          # на реальных схемах так почти не рисуют
             grp.append(cp)
             free.remove(cp)
         nets.append(grp)
@@ -817,6 +866,7 @@ def _finish(sh, rng, seed, level):
         b = c["box"]
         tc = np.array([_pt(M, x, y) for x, y in ((b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3]))])
         truth["comps"].append({"id": c["id"], "type": c["type"], "ref": c.get("ref"), "value": c.get("value"),
+                               "chip": c.get("chip"),
                                "box": [float(tc[:, 0].min()), float(tc[:, 1].min()),
                                        float(tc[:, 0].max()), float(tc[:, 1].max())]})
         for p in c["pins"]:

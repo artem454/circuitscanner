@@ -94,7 +94,8 @@ class App(tk.Tk):
         ttk.Button(bar, text="Печатная плата", command=self.run_pcb).pack(side="left")
         ttk.Button(bar, text="Ассистент", command=self.assistant).pack(side="left", padx=4)
         ttk.Button(bar, text="Папка проекта", command=self.open_folder).pack(side="left")
-        ttk.Button(bar, text="Дообучить", command=self.train).pack(side="left", padx=4)
+        ttk.Button(bar, text="Лист проверен", command=self.mark_verified).pack(side="left", padx=4)
+        ttk.Button(bar, text="Дообучить", command=self.train).pack(side="left")
 
         self.status = tk.StringVar(value="Откройте картинку схемы или папку проекта.")
         ttk.Label(self, textvariable=self.status, anchor="w", relief="sunken",
@@ -584,6 +585,23 @@ class App(tk.Tk):
         self.status.set("Обучение завершено. " + (last[0] if last else ""))
         self.generation(force=True)                  # после ручного дообучения — новое поколение
 
+    def mark_verified(self):
+        """Учебным примером лист становится только после явного подтверждения: все детали, обозначения,
+        номиналы и соединения проверены. Иначе в обучение попал бы и непроверенный черновик."""
+        import teach
+        if not self.project or not self.netlist:
+            return messagebox.showinfo("Лист проверен", "Нужен netlist.json: сначала распознайте схему.")
+        if any(i["level"] == "error" for i in self.issues):
+            return messagebox.showwarning("Лист проверен", "В netlist есть ошибки (вкладка «Проверка») — "
+                                          "сначала исправьте их.")
+        if not messagebox.askyesno("Лист проверен", "Все детали, их типы, обозначения, номиналы и соединения "
+                                   "на этом листе проверены и верны?\n\nЛист станет учебным примером."):
+            return
+        self.netlist["verified"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        teach.save_netlist(self.project, self.netlist)
+        self.bridge.action("verified", project=str(self.project))
+        self.train(self.project)
+
     def generation(self, force=False):
         """Поколение самообучения в фоне: пул символов всех схем → уверенные согласия обеих моделей → обучение."""
         import generations
@@ -774,9 +792,7 @@ class App(tk.Tk):
                     self.status.set(f"netlist.json обновлён {datetime.now():%H:%M:%S}: "
                                     f"{len(self.comps)} компонентов, {len(self.nets)} цепей, "
                                     f"замечаний: {len(self.issues)}")
-                    # схема без ошибок — сама становится учебным примером для анализатора
-                    if self.netlist and not any(i["level"] == "error" for i in self.issues):
-                        self.after(3000, lambda: self.train(self.project, quiet=True))
+                    # учебным примером лист становится только по кнопке «Лист проверен» (mark_verified)
         self.after(1500, self._poll)
 
     def copy_task(self):

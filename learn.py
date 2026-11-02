@@ -8,11 +8,16 @@
     python learn.py curriculum [N] [шагов] — по ступеням: от чистых простых схем до фото сложных
     python learn.py guard проект …      — реальные схемы без ответа: страховка от переобучения
     python learn.py ocr [N]             — дообучить распознавание надписей на N учебных схемах
+    python learn.py holdout проект …    — отложить проверенный лист в тест: в обучении и подборе не участвует
 
 Оценка: для каждой пары выводов сравнивается «в одной цепи / в разных» по ответу
-и по анализатору (F1), плюс доля найденных деталей. Подбор — случайный поиск
-вокруг лучшего найденного; каждый шаг пишется в learned/history.jsonl, так что
-обучение можно продолжать с того места, где остановились.
+и по анализатору (F1); детали и выводы сопоставляются один к одному, так что лишние
+находки снижают точность (precision), а пропуски — полноту (recall); в score идут F1.
+Подбор — случайный поиск вокруг лучшего найденного на учебном наборе (SEED0); шаг
+принимается, только если не ухудшилась и отдельная проверочная синтетика (SEED_VAL),
+которую подбор не оптимизирует. Отложенные листы (learned/test_sheets.json) видит
+только `learn.py eval`. Каждый шаг пишется в learned/history.jsonl, так что обучение
+можно продолжать с того места, где остановились.
 """
 import json
 import math
@@ -32,7 +37,9 @@ import core
 import synth
 
 LEARNED = analyzer.LEARNED
-SEED0 = 5000                     # фиксированный набор схем для сравнения параметров
+SEED0 = 5000                     # учебный набор схем для сравнения параметров при подборе
+SEED_VAL = 60000                 # проверочный набор: подбор его не оптимизирует, только сверяется (9000+ — примеры символов)
+VAL_TOL = 0.002                  # насколько может просесть проверка, чтобы шаг всё же приняли
 
 # пределы для подбора: (мин, макс, целое?)
 SPACE = {
@@ -70,7 +77,13 @@ def prep(img, truth=None):
 # ---------- оценка ----------
 
 def score(res, truth):
-    """Сравнить результат анализатора с ответом. Возвращает словарь метрик."""
+    """Сравнить результат анализатора с ответом. Возвращает словарь метрик.
+    truth["parts_only"] — в ответе только детали (проверенный netlist: земля и питание там — свойства
+    цепей), поэтому символы земли/питания анализатора и их выводы не считаются ни верными, ни лишними."""
+    if truth.get("parts_only"):
+        skip = {s["id"] for s in res["symbols"] if s["kind"] in ("GND", "PORT")}
+        res = dict(res, symbols=[s for s in res["symbols"] if s["id"] not in skip],
+                   nets=[dict(n, pins=[p for p in n["pins"] if p["symbol"] not in skip]) for n in res["nets"]])
     an_pins = [(p["x"], p["y"], n["id"], p["symbol"]) for n in res["nets"] for p in n["pins"]]
     A = np.array([(x, y) for x, y, _, _ in an_pins]).reshape(-1, 2)
     R = max(8.0, 4 * res["stroke"])
@@ -98,6 +111,12 @@ def score(res, truth):
             pred.append(an_pins[best][2])
         else:
             pred.append(None)
+    # выводы анализатора в цепях из 2+ выводов, не совпавшие ни с одним выводом ответа, — лишние
+    per_net = {}
+    for _, _, nid, _ in an_pins:
+        per_net[nid] = per_net.get(nid, 0) + 1
+    multi = {i for i, (_, _, nid, _) in enumerate(an_pins) if per_net[nid] > 1}
+    pin_prec = len(taken & multi) / len(multi) if multi else 1.0
     tp_ = fp = fn = 0
     tn = [p["net"] for p in truth["pins"]]
     n = len(tn)
@@ -114,16 +133,44 @@ def score(res, truth):
     prec = tp_ / (tp_ + fp) if tp_ + fp else 1.0
     rec = tp_ / (tp_ + fn) if tp_ + fn else 1.0
     f1 = 2 * prec * rec / (prec + rec) if prec + rec else 0.0
-    found = 0
-    for c in truth["comps"]:
-        cx, cy = (c["box"][0] + c["box"][2]) / 2, (c["box"][1] + c["box"][3]) / 2
-        if any(s["box"][0] - R <= cx <= s["box"][2] + R and s["box"][1] - R <= cy <= s["box"][3] + R
-               for s in res["symbols"]):
-            found += 1
+    found = _match_comps(truth["comps"], res["symbols"], R)
     comp_rec = found / max(1, len(truth["comps"]))
+    comp_prec = found / len(res["symbols"]) if res["symbols"] else 1.0
     pin_rec = sum(p is not None for p in pred) / max(1, n)
-    return {"f1": f1, "precision": prec, "recall": rec, "comps": comp_rec, "pins": pin_rec,
-            "score": 0.6 * f1 + 0.2 * comp_rec + 0.2 * pin_rec}
+    return {"f1": f1, "precision": prec, "recall": rec,
+            "comps": comp_rec, "comps_prec": comp_prec, "comps_f1": _f1(comp_prec, comp_rec),
+            "pins": pin_rec, "pins_prec": pin_prec, "pins_f1": _f1(pin_prec, pin_rec),
+            "extra_symbols": len(res["symbols"]) - found,
+            "score": 0.6 * f1 + 0.2 * _f1(comp_prec, comp_rec) + 0.2 * _f1(pin_prec, pin_rec)}
+
+
+def _f1(p, r):
+    return 2 * p * r / (p + r) if p + r else 0.0
+
+
+def _match_comps(comps, symbols, R):
+    """Сколько деталей ответа нашлось, если каждый символ анализатора засчитывается не больше
+    одного раза: пара годится, когда центр одной рамки лежит в другой (с допуском R); пары
+    разбираются от ближайших центров. Лишние и раздробленные символы остаются без пары."""
+    def center(b):
+        return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+
+    def inside(pt, b):
+        return b[0] - R <= pt[0] <= b[2] + R and b[1] - R <= pt[1] <= b[3] + R
+
+    pairs = []
+    for i, c in enumerate(comps):
+        ct = center(c["box"])
+        for j, s in enumerate(symbols):
+            cs = center(s["box"])
+            if inside(ct, s["box"]) or inside(cs, c["box"]):
+                pairs.append((math.hypot(ct[0] - cs[0], ct[1] - cs[1]), i, j))
+    used_c, used_s = set(), set()
+    for _, i, j in sorted(pairs):
+        if i not in used_c and j not in used_s:
+            used_c.add(i)
+            used_s.add(j)
+    return len(used_c)
 
 
 LEVELS_ALL = (1, 2, 3, 4, 5)
@@ -138,9 +185,11 @@ def _eval_one(args):
     return m
 
 
-def evaluate(params, n=24, pool=None, levels=LEVELS_ALL):
-    """Средние метрики на n схемах; уровни сложности по кругу. В m["by_level"] — score по уровням."""
-    jobs = [(SEED0 + i, params, levels[i % len(levels)]) for i in range(n)]
+def evaluate(params, n=24, pool=None, levels=LEVELS_ALL, seed0=SEED0, real=True, test=False):
+    """Средние метрики на n схемах; уровни сложности по кругу. В m["by_level"] — score по уровням.
+    real — подмешать учебные проверенные листы; test — отдельно посчитать отложенные листы
+    (m["test_real"], в score не входит)."""
+    jobs = [(seed0 + i, params, levels[i % len(levels)]) for i in range(n)]
     rows = list(pool.map(_eval_one, jobs)) if pool else [_eval_one(j) for j in jobs]
     keys = [k for k in rows[0] if k != "level"]
     m = {k: float(np.mean([r[k] for r in rows])) for k in keys}
@@ -152,11 +201,15 @@ def evaluate(params, n=24, pool=None, levels=LEVELS_ALL):
             [_guard_one((g, params)) for g in guards]
         m["guard"] = float(np.mean(gf))
         m["score"] *= m["guard"]
-    real = [p for p in registered() if (Path(p) / "netlist.json").exists()]
-    if real:
-        rr = list(pool.map(_real_one, [(p, params) for p in real])) if pool else             [_real_one((p, params)) for p in real]
-        m["real"] = float(np.mean(rr))
+    run = lambda ps: list(pool.map(_real_one, [(p, params) for p in ps])) if pool else \
+        [_real_one((p, params)) for p in ps]
+    train = [p for p in registered() if (Path(p) / "netlist.json").exists()] if real else []
+    if train:
+        m["real"] = float(np.mean(run(train)))
         m["score"] = 0.7 * m["score"] + 0.3 * m["real"]
+    held = [p for p in test_sheets() if (Path(p) / "netlist.json").exists()] if test else []
+    if held:
+        m["test_real"] = float(np.mean(run(held)))
     return m
 
 
@@ -166,10 +219,54 @@ def registered():
     return (core.load_json(LEARNED / "projects.json") or [])
 
 
+def test_sheets():
+    """Отложенные проверенные листы: только для итоговой оценки, никогда для обучения."""
+    return core.load_json(LEARNED / "test_sheets.json") or []
+
+
+def holdout(project):
+    """Перевести проверенный лист в тест целиком: убрать из учебных проектов и удалить
+    уже взятые с него примеры символов, чтобы он больше нигде не участвовал в обучении."""
+    p = str(Path(project).resolve())
+    LEARNED.mkdir(exist_ok=True)
+    tests = test_sheets()
+    if p not in tests:
+        tests.append(p)
+        (LEARNED / "test_sheets.json").write_text(json.dumps(tests, ensure_ascii=False, indent=1),
+                                                  encoding="utf-8")
+    lst = [q for q in registered() if q != p]
+    (LEARNED / "projects.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), encoding="utf-8")
+    import generations
+    name = Path(p).name
+    pf = generations._pool_file(p)
+    pool = generations._load(pf)
+    gi = np.flatnonzero(pool["status"] == "gen") if pool else []
+    own = {"X": {pool["feat"][i].astype(np.float16).tobytes() for i in gi} if pool else set(),
+           "crops": {pool["crop"][i].tobytes() for i in gi} if pool else set()}
+    removed = 0
+    for path, field in ((LEARNED / "symbols.npz", "X"), (LEARNED / "symdata.npz", "crops")):
+        if path.exists():
+            d = dict(np.load(path, allow_pickle=False))
+            src = d["src"].astype(str)
+            vals = d[field].astype(np.float16) if field == "X" else d[field]
+            # примеры с листа, ваши правки на нём и метки поколения, выданные его символам
+            drop = (src == "real:" + name) | np.char.startswith(src, f"user:{name}:")
+            drop |= np.array([s == "gen" and vals[i].tobytes() in own[field] for i, s in enumerate(src)], bool)
+            removed += int(drop.sum())
+            np.savez_compressed(path, **{k: v[~drop] for k, v in d.items()})
+    if pf.exists():                              # пул листа — в сторону: поколения его больше не видят
+        (LEARNED / "pool_test").mkdir(exist_ok=True)
+        pf.replace(LEARNED / "pool_test" / pf.name)
+    print(f"{name}: отложен в тест, убрано примеров символов: {removed}; "
+          f"учебных листов {len(lst)}, тестовых {len(tests)}")
+
+
 def register(project):
+    p = str(Path(project).resolve())
+    if p in test_sheets():
+        return                                   # тестовый лист в обучение не попадает
     LEARNED.mkdir(exist_ok=True)
     lst = registered()
-    p = str(Path(project).resolve())
     if p not in lst:
         lst.append(p)
         (LEARNED / "projects.json").write_text(json.dumps(lst, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -239,6 +336,28 @@ def _guard_one(args):
     return f
 
 
+def truth_from_netlist(nl):
+    """Проверенный netlist с рамками и точками выводов (box, pin_xy у каждой детали) → ответ в
+    формате синтетики для score(). None, если хоть у одной детали координат нет."""
+    comps = [c for c in (nl or {}).get("components", []) if c.get("type") not in ("GND", "PORT")]
+    if not comps or not all(c.get("box") and c.get("pin_xy") for c in comps):
+        return None
+    ids = {}
+    pins = []
+    for c in comps:
+        for pn, net in (c.get("pins") or {}).items():
+            xy = c["pin_xy"].get(pn)
+            if xy is None or not net:
+                continue
+            pins.append({"comp": c["ref"], "pin": pn, "x": xy[0], "y": xy[1], "ox": xy[0], "oy": xy[1],
+                         "net": ids.setdefault(net, len(ids))})
+    out = []
+    for c in comps:                                    # микросхема из секций — каждая секция своим символом
+        for s, b in (c.get("section_boxes") or {"": c["box"]}).items():
+            out.append({"type": c.get("type"), "ref": f"{c.get('ref')}.{s}" if s else c.get("ref"), "box": b})
+    return {"comps": out, "pins": pins, "parts_only": True}
+
+
 def _real_one(args):
     """Слабая оценка на проверенном проекте + страховка от переобучения: если точек
     соединения стало намного меньше, чем при исходных параметрах, — штраф."""
@@ -247,7 +366,10 @@ def _real_one(args):
     gray = core.imread(project / "clean.png")[:, :, 0]
     res = analyzer.analyze_gray(gray, params)
     man = core.load_json(project / "manifest.json")
-    s = score_real(res, core.load_json(project / "netlist.json"), man["grid"]["cell"])
+    nl = core.load_json(project / "netlist.json")
+    truth = truth_from_netlist(nl)
+    # лист с точками выводов — та же строгая оценка, что на синтетике; иначе — слабая, по клеткам
+    s = score(res, truth)["score"] if truth else score_real(res, nl, man["grid"]["cell"])
     if str(project) not in _BASE_DOTS:
         _BASE_DOTS[str(project)] = len(analyzer.analyze_gray(gray, dict(analyzer.DEFAULTS))["dots"])
     base = _BASE_DOTS[str(project)]
@@ -290,23 +412,33 @@ def tune(n=24, steps=60, seed=None, levels=LEVELS_ALL):
     workers = max(1, (os.cpu_count() or 2) - 1)
     with ProcessPoolExecutor(workers) as pool:
         best_m = evaluate(best, n, pool, levels)
-        print(f"старт: score {best_m['score']:.4f}  F1 {best_m['f1']:.3f}  детали {best_m['comps']:.3f}  "
-              f"выводы {best_m['pins']:.3f}")
+        best_v = evaluate(best, n, pool, levels, seed0=SEED_VAL, real=False)["score"]
+        best_m["val"] = best_v
+        print(f"старт: score {best_m['score']:.4f}  проверка {best_v:.4f}  F1 {best_m['f1']:.3f}  "
+              f"детали P/R {best_m['comps_prec']:.3f}/{best_m['comps']:.3f}  "
+              f"выводы P/R {best_m['pins_prec']:.3f}/{best_m['pins']:.3f}")
         log({"step": 0, "metrics": best_m, "params": best, "accepted": True})
         for step in range(1, steps + 1):
             strength = 0.25 * (1 - step / (steps + 1)) + 0.05
             cand = perturb(best, rng, strength)
             m = evaluate(cand, n, pool, levels)
             ok = m["score"] > best_m["score"] + 1e-4
+            if ok:                               # улучшение на учебном наборе сверяем с проверочным
+                m["val"] = evaluate(cand, n, pool, levels, seed0=SEED_VAL, real=False)["score"]
+                ok = m["val"] >= best_v - VAL_TOL
             log({"step": step, "metrics": m, "params": cand, "accepted": ok})
             if ok:
-                best, best_m = cand, m
-                save_params(best, best_m, f"подобрано на {n} синтетических схемах")
+                best, best_m, best_v = cand, m, max(best_v, m["val"])
+                save_params(best, best_m, f"подобрано на {n} синтетических схемах, сверено с проверочными")
                 changed = {k: v for k, v in cand.items() if analyzer.DEFAULTS.get(k) != v}
-                print(f"шаг {step}: лучше → score {m['score']:.4f}  F1 {m['f1']:.3f}  {changed}")
+                print(f"шаг {step}: лучше → score {m['score']:.4f}  проверка {m['val']:.4f}  "
+                      f"F1 {m['f1']:.3f}  {changed}")
+            elif "val" in m:
+                print(f"шаг {step}: {m['score']:.4f}, но проверка {m['val']:.4f} < {best_v:.4f} — отклонено")
             else:
                 print(f"шаг {step}: {m['score']:.4f}", end="\r")
-    print(f"\nитог: score {best_m['score']:.4f}  F1 {best_m['f1']:.3f}  по уровням {best_m['by_level']}")
+    print(f"\nитог: score {best_m['score']:.4f}  проверка {best_m['val']:.4f}  F1 {best_m['f1']:.3f}  "
+          f"по уровням {best_m['by_level']}")
     return best, best_m
 
 
@@ -525,8 +657,16 @@ def real_examples(project, res=None):
 def add_project(project):
     """Проверенный проект → примеры для классификатора символов (заменяют прежние с этого листа)."""
     project = Path(project)
-    if not core.load_json(project / "netlist.json"):
+    if str(project.resolve()) in test_sheets():
+        print(f"{project.name}: тестовый лист, в обучение не добавляется")
+        return
+    nl = core.load_json(project / "netlist.json")
+    if not nl:
         raise SystemExit("в проекте нет netlist.json")
+    if not nl.get("verified") and str(project.resolve()) not in registered():
+        # прежние учебные листы остаются; новый — только после кнопки «Лист проверен»
+        print(f"{project.name}: лист не отмечен как проверенный (кнопка «Лист проверен»), в обучение не добавляется")
+        return
     register(project)
     X, y, Cr = real_examples(project)
     if not X:
@@ -545,7 +685,11 @@ if __name__ == "__main__":
         n = int(sys.argv[2]) if len(sys.argv) > 2 else 24
         workers = max(1, (os.cpu_count() or 2) - 1)
         with ProcessPoolExecutor(workers) as pool:
-            m = evaluate(analyzer.load_params(), n, pool)
+            P = analyzer.load_params()
+            m = evaluate(P, n, pool, test=True)
+            v = evaluate(P, n, pool, seed0=SEED_VAL, real=False)
+            m["val"] = v["score"]
+            m["val_by_level"] = v["by_level"]
         print(json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in m.items()}, ensure_ascii=False))
     elif cmd == "tune":
         tune(int(sys.argv[2]) if len(sys.argv) > 2 else 24, int(sys.argv[3]) if len(sys.argv) > 3 else 60)
@@ -553,6 +697,9 @@ if __name__ == "__main__":
         train_symbols(int(sys.argv[2]) if len(sys.argv) > 2 else 80)
     elif cmd == "add":
         add_project(sys.argv[2])
+    elif cmd == "holdout":
+        for p in sys.argv[2:]:
+            holdout(p)
     elif cmd == "guard":
         # python learn.py guard папка_проекта … — добавить реальные схемы (без ответа) в страховку
         lst = core.load_json(LEARNED / "guard.json") or []

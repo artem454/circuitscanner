@@ -269,9 +269,11 @@ MULT = "pnuμmkKMR"
 
 
 def fix_ref(t):
-    """'RI2' → 'R12', 'VTI' → 'VT1'. None, если на обозначение не похоже."""
-    t = t.replace(" ", "").replace(".", "")
-    if not 2 <= len(t) <= 6 or not t[0].isalpha():
+    """'RI2' → 'R12', 'VTI' → 'VT1', 'DD3.1' → 'DD3.1' (секция микросхемы, контакт KM1.2 — точка
+    между цифрами остаётся). None, если на обозначение не похоже."""
+    t = t.replace(" ", "")
+    t = re.sub(r"(?<![0-9OIlZSB])\.|\.(?![0-9OIlZSB])", "", t)    # точка — только между цифрами
+    if not 2 <= len(t) <= 8 or not t[0].isalpha():
         return None                                   # «277» — номинал, а не «Z77»
     up = t.upper()
     for p in REF_PREFIX:

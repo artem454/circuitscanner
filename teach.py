@@ -41,6 +41,8 @@ def teach(project, comp, new_type, new_ref=None, old_ref=None, new_value=None):
     if not box:
         return "у детали нет координат символа (netlist не из «Netlist без ИИ») — запомнено только в netlist"
     project = Path(project)
+    if str(project.resolve()) in learn.test_sheets():
+        return "это тестовый лист — правка сохранена только в netlist, в обучение не идёт"
     gray, ink, sw, res = _ink_and_stroke(project)
     cls = CLASS_OF.get(new_type) or ("OTHER" if new_type == NOT_PART else learn.TYPE_MAP.get(new_type, new_type))
     src = f"user:{project.name}:{old_ref or comp.get('ref')}"

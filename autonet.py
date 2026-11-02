@@ -109,6 +109,45 @@ def _center(b):
     return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
 
 
+SECTION_PREFIXES = {"DD", "DA", "D", "U", "IC"}         # микросхемы; KM1.1, K2.3 — контакты аппаратов, их не сливаем
+
+
+def merge_sections(comps):
+    """Секции одного корпуса (DD1.1, DD1.2 — элементы И/ИЛИ; DA1.1, DA1.2 — половинки сдвоенного ОУ)
+    → одна микросхема DD1 / DA1. Выводы — «секция.вывод» (1.1, 1.2, 2.3…): мелкие номера выводов
+    корпуса у ножек свой OCR читает ненадёжно (на синтетике — ни одного верного), а неверный номер
+    хуже никакого; номера корпуса вписываются при проверке листа."""
+    groups, out = {}, []
+    for c in comps:
+        m = re.fullmatch(r"([A-Z]+)(\d+)\.(\d{1,2})", c["ref"])
+        if m and m.group(1) in SECTION_PREFIXES:
+            groups.setdefault(m.group(1) + m.group(2), []).append((int(m.group(3)), c))
+        else:
+            out.append(c)
+    for base, parts in groups.items():
+        parts.sort(key=lambda sc: sc[0])
+        pins, xy = {}, {}
+        for sec, c in parts:
+            for pn, net in c["pins"].items():
+                name = f"{sec}.{pn}"
+                pins[name] = net
+                if (c.get("pin_xy") or {}).get(pn) is not None:
+                    xy[name] = c["pin_xy"][pn]
+        boxes = [c["box"] for _, c in parts]
+        first = parts[0][1]
+        merged = {"ref": base, "type": first["type"], "value": next((c["value"] for _, c in parts if c["value"]), ""),
+                  "pins": pins, "box": [min(b[0] for b in boxes), min(b[1] for b in boxes),
+                                        max(b[2] for b in boxes), max(b[3] for b in boxes)],
+                  "pin_xy": xy, "sections": [c["ref"] for _, c in parts],
+                  "section_boxes": {str(s): c["box"] for s, c in parts}}
+        if first.get("cell"):
+            merged["cell"] = first["cell"]
+        if any(c.get("confidence") == "low" for _, c in parts):
+            merged["confidence"] = "low"
+        out.append(merged)
+    return out
+
+
 def build(res, title="Автоматический разбор (без ИИ)", cell=None):
     """res — результат analyzer.analyze_gray/analyze с прочитанными надписями. Возвращает netlist."""
     syms = {s["id"]: s for s in res["symbols"] if s["kind"] not in NOT_PARTS}
@@ -206,10 +245,12 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             final[root] = nm
 
     # --- компоненты и выводы ---
-    pins_of = {}
+    pins_of, unsure = {}, set()
     for n in res["nets"]:
         for p in n["pins"]:
             pins_of.setdefault(p["symbol"], []).append((p["x"], p["y"], final[find(n["id"])]))
+            if p.get("ambiguous"):
+                unsure.add(p["symbol"])                      # провод мог прийти и к соседнему символу
     comps, counter, questions, junk = [], {}, [], 0
     for sid, s in syms.items():
         pins = pins_of.get(sid, [])
@@ -229,6 +270,8 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             low = True
         elif s.get("uncertain") and not pt:
             low = True                                       # две модели разошлись, подписи нет
+        if sid in unsure:
+            low = True                                       # спорная привязка вывода — на проверку
         if not ref:
             letter = {"R": "R", "C": "C", "L": "L", "D": "VD", "Z": "VD", "Q": "VT", "M": "VT", "U": "DA",
                       "MCU": "DD", "K": "K", "SW": "SA", "BTN": "SB", "LAMP": "HL", "F": "FU", "QF": "QF",
@@ -247,12 +290,15 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             pin_names = [str(i + 1) for i in range(len(pins))]
         cx, cy = _center(b)
         c = {"ref": ref, "type": typ, "value": val_of.get(sid, ""), "pins": {pn: p[2] for pn, p in zip(pin_names, pins)},
-             "box": [round(v, 1) for v in b]}
+             "box": [round(v, 1) for v in b],
+             # точки выводов (координаты clean.png): после вашей проверки лист оценивается по ним, а не по клеткам
+             "pin_xy": {pn: [round(p[0], 1), round(p[1], 1)] for pn, p in zip(pin_names, pins)}}
         if cell:
             c["cell"] = f"{core.col_name(int(cx // cell))}{int(cy // cell) + 1}"
         if low or typ == "X":
             c["confidence"] = "low"
         comps.append(c)
+    comps = merge_sections(comps)
     # одинаковые обозначения (OCR ошибся или схема) — второму добавить суффикс
     seen = {}
     for c in comps:
@@ -301,17 +347,26 @@ def run(project, progress=None, overwrite=False):
 # ---------- оценка на схеме с ответом ----------
 
 def score(nl, truth):
-    """Тип, обозначение, номинал — по совпадению рамок деталей; цепи — learn.score."""
+    """Тип, обозначение, номинал — по совпадению рамок деталей; цепи — learn.score.
+    Микросхема из секций сравнивается по рамке каждой секции; chips — доля секций ответа, попавших
+    в тот же корпус, что их соседки по корпусу (DD3.1 и DD3.2 → один DD3)."""
     T = [c for c in truth["comps"] if c["type"] not in NOT_PARTS]
+    units = []                                         # (рамка, деталь netlist, обозначение секции)
+    for k, p in enumerate(nl["components"]):
+        if p.get("section_boxes"):
+            for s, b in p["section_boxes"].items():
+                units.append((b, k, f"{p['ref']}.{s}"))
+        else:
+            units.append((p["box"], k, p["ref"]))
     used = set()
+    chip_of = {}                                       # секция ответа → индекс детали netlist
     typ_ok = ref_ok = ref_n = val_ok = val_n = found = 0
     for c in T:
         cx, cy = _center(c["box"])
         best = None
-        for i, p in enumerate(nl["components"]):
+        for i, (b, _, _) in enumerate(units):
             if i in used:
                 continue
-            b = p["box"]
             if b[0] - 6 <= cx <= b[2] + 6 and b[1] - 6 <= cy <= b[3] + 6:
                 best = i
                 break
@@ -319,7 +374,9 @@ def score(nl, truth):
             continue
         used.add(best)
         found += 1
-        p = nl["components"][best]
+        p = dict(nl["components"][units[best][1]], ref=units[best][2])
+        if c.get("chip"):
+            chip_of[c["id"]] = units[best][1]
         want = KIND2TYPE.get(c["type"], c["type"]) if c["type"] not in ("SW_NO", "SW_NC", "THERMAL") else "SW"
         want = {"OPAMP": "U", "COIL": "K", "FU": "F"}.get(c["type"], want)
         typ_ok += p["type"] == want or (p["type"], want) in COMPAT
@@ -330,8 +387,14 @@ def score(nl, truth):
             val_n += 1
             val_ok += p["value"] == ocrmod.fix_value(c["value"])
     n = max(1, len(T))
+    # корпуса: секция засчитана, если все её соседки по корпусу (из найденных) — в той же детали netlist
+    secs = [c for c in T if c.get("chip") and c["id"] in chip_of]
+    chips_ok = sum(all(chip_of[o["id"]] == chip_of[c["id"]] for o in secs if o["chip"] == c["chip"]) and
+                   all(chip_of[o["id"]] != chip_of[c["id"]] for o in secs if o["chip"] != c["chip"])
+                   for c in secs)
     return {"found": found / n, "type": typ_ok / found if found else None,
-            "ref": ref_ok / ref_n if ref_n else None, "value": val_ok / val_n if val_n else None}
+            "ref": ref_ok / ref_n if ref_n else None, "value": val_ok / val_n if val_n else None,
+            "chips": chips_ok / len(secs) if len(secs) > 1 else None}
 
 
 if __name__ == "__main__":

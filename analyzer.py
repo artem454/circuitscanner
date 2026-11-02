@@ -321,13 +321,28 @@ def line_segments(mask, horizontal, sw, min_len, P):
     return wires, plates
 
 
-def drop_frame(hw, vw, W, H):
-    """Рамка чертежа: горизонтали почти во всю ширину у верхнего/нижнего края."""
-    return [s for s in hw if not (s[2] - s[0] > 0.8 * W and (s[1] < 0.08 * H or s[1] > 0.92 * H))]
+def _ends_on(line, others, axis, tol):
+    """Сколько перпендикулярных отрезков упирается концом в линию (axis 0 — горизонталь)."""
+    k = 0
+    for o in others:
+        for x, y in ((o[0], o[1]), (o[2], o[3])):
+            if axis == 0 and abs(y - line[1]) <= tol and line[0] - tol <= x <= line[2] + tol:
+                k += 1
+            elif axis == 1 and abs(x - line[0]) <= tol and line[1] - tol <= y <= line[3] + tol:
+                k += 1
+    return k
 
 
-def drop_frame_v(vw, W, H):
-    return [s for s in vw if not (s[3] - s[1] > 0.8 * H and (s[0] < 0.08 * W or s[0] > 0.92 * W))]
+def drop_frame(hw, vw, W, H, tol=0):
+    """Рамка чертежа: горизонтали почти во всю ширину у верхнего/нижнего края. Линия, в которую
+    упираются провода, — шина (питание, «0», «N» релейной схемы), её оставляем."""
+    return [s for s in hw if not (s[2] - s[0] > 0.8 * W and (s[1] < 0.08 * H or s[1] > 0.92 * H)
+                                  and _ends_on(s, vw, 0, tol) < 2)]
+
+
+def drop_frame_v(vw, W, H, hw=(), tol=0):
+    return [s for s in vw if not (s[3] - s[1] > 0.8 * H and (s[0] < 0.08 * W or s[0] > 0.92 * W)
+                                  and _ends_on(s, hw, 1, tol) < 2)]
 
 
 def drop_through_text(segs, words, sw):
@@ -375,9 +390,39 @@ def drop_dashed(segs, axis, sw, min_len):
     return [s for k, s in enumerate(segs) if k not in drop]
 
 
-def clip_segments(segs, boxes, keep_len):
+def absorb_pin_labels(symbols, sw):
+    """Номера выводов над ножками микросхемы («1», «2», «13») вместе с ножками дают маленький «символ»
+    вплотную сбоку от корпуса — и он забирает себе выводы корпуса. Такой символ (не выше корпуса,
+    уже его, примыкает к боковой стороне) присоединяем к корпусу."""
+    rects = [s for s in symbols if s["kind"] in ("U", "R")]
+    keep = []
+    for s in symbols:
+        b = s["box"]
+        host = None
+        if s["kind"] == "?":
+            for r in rects:
+                R = r["box"]
+                rh, rw = R[3] - R[1], R[2] - R[0]
+                overlap = min(b[3], R[3]) - max(b[1], R[1])
+                gap = max(R[0] - b[2], b[0] - R[2])
+                if (b[3] - b[1] <= rh + 2 * sw and overlap >= 0.5 * (b[3] - b[1]) and gap <= 2 * sw
+                        and b[2] - b[0] <= max(rw, 8 * sw)):
+                    host = r
+                    break
+        if host is None:
+            keep.append(s)
+            continue
+        R = host["box"]
+        host["box"] = [min(R[0], b[0]), min(R[1], b[1]), max(R[2], b[2]), max(R[3], b[3])]
+        host["kind"] = "U"                                   # с ножками — уже не резистор
+    return keep
+
+
+def clip_segments(segs, boxes, keep_len, edge=0):
     """Разрезать провода, проходящие сквозь символы: остаются куски снаружи.
-    Короткий остаток у символа — это его ножка, поэтому порог низкий."""
+    Короткий остаток у символа — это его ножка, поэтому порог низкий.
+    Сплошной провод, проходящий рамку насквозь в полосе edge у её края, — соседний провод, задетый
+    разросшейся рамкой, а не ножки символа (ось символа идёт через середину): его не режем."""
     out = []
     for s in segs:
         pieces = [s]
@@ -385,7 +430,11 @@ def clip_segments(segs, boxes, keep_len):
             nxt = []
             for p in pieces:
                 x0, y0, x1, y1 = p
-                if y0 == y1 and b[1] <= y0 <= b[3] and x0 < b[2] and x1 > b[0]:
+                if y0 == y1 and x0 < b[0] and x1 > b[2] and min(y0 - b[1], b[3] - y0) <= edge:
+                    nxt.append(p)
+                elif x0 == x1 and y0 < b[1] and y1 > b[3] and min(x0 - b[0], b[2] - x0) <= edge:
+                    nxt.append(p)
+                elif y0 == y1 and b[1] <= y0 <= b[3] and x0 < b[2] and x1 > b[0]:
                     if x0 < b[0]:
                         nxt.append([x0, y0, b[0], y0])
                     if x1 > b[2]:
@@ -580,7 +629,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     vw, vp = line_segments(vmask, False, sw, min_len, P)
     dots = find_dots(work, sw, P)
 
-    hw, vw = drop_frame(hw, vw, W, H), drop_frame_v(vw, W, H)
+    hw, vw = drop_frame(hw, vw, W, H, tol), drop_frame_v(vw, W, H, hw, tol)
     hw, vw = drop_dashed(hw, 0, sw, min_len), drop_dashed(vw, 1, sw, min_len)
     hw, vw = drop_through_text(hw, words, sw), drop_through_text(vw, words, sw)
 
@@ -598,6 +647,30 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     wire_mask = np.zeros_like(work)
     for x0, y0, x1, y1 in wires:
         cv2.line(wire_mask, (int(x0), int(y0)), (int(x1), int(y1)), 255, sw + 2)
+    if P.get("wire_pixels", 1):
+        # на фото после выравнивания провод чуть наклонён: ровная линия не покрывает его края, и остатки
+        # становятся узкими «символами» вдоль провода. Вычитаем и сами найденные пиксели провода
+        # (маски открытия), но только рядом с найденными проводами
+        bw_ = int(P.get("wire_band", 4) * sw) | 1
+        band = cv2.dilate(wire_mask, cv2.getStructuringElement(cv2.MORPH_RECT, (bw_, bw_)))
+        # только длинные наклонные куски: короткий штрих рядом с проводом — обкладка конденсатора, полоска
+        # диода; жирный прямой провод (силовая шина) заполняет свою рамку почти целиком — его покрывает
+        # и ровная линия, а вычитание целиком съело бы края соседних символов
+        long_len = P["stroke_len"] * min_len
+        pix = np.zeros_like(work)
+        n_long = n_slant = 0
+        for m, horizontal in ((hmask, True), (vmask, False)):
+            n_, lab_, st_, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+            longs = [i for i in range(1, n_) if st_[i][2 if horizontal else 3] >= long_len]
+            keep_ = [i for i in longs if st_[i][3 if horizontal else 2] > sw + 3
+                     and st_[i][4] < 0.6 * st_[i][2] * st_[i][3]]
+            n_long, n_slant = n_long + len(longs), n_slant + len(keep_)
+            if keep_:
+                pix[np.isin(lab_, keep_)] = 255
+        if n_slant < 0.2 * max(1, n_long):
+            pix[:] = 0                                       # чертёж ровный — наклонных проводов нет
+        pix = cv2.dilate(pix, np.ones((3, 3), np.uint8))
+        wire_mask = cv2.bitwise_or(wire_mask, cv2.bitwise_and(pix, band))
     dot_mask = np.zeros_like(work)
     for x, y, r in dots:
         cv2.circle(dot_mask, (int(x), int(y)), int(r + sw + 1), 255, -1)
@@ -621,6 +694,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         if max(w, h) > 0.35 * max(W, H):
             continue
         symbols.append({"box": [int(x), int(y), int(x + w - 1), int(y + h - 1)], "kind": "?"})
+    if P.get("absorb_pins", 1):
+        symbols = absorb_pin_labels(symbols, sw)
 
     step("цепи")
     sym_boxes = [sy["box"] for sy in symbols if sy["kind"] == "?"]
@@ -628,7 +703,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     # обкладка) — часть символа, а не точка соединения
     dots = [d for d in dots if not any(b[0] + sw <= d[0] <= b[2] - sw and b[1] + sw <= d[1] <= b[3] - sw
                                        for b in sym_boxes)]
-    segs = clip_segments(wires, sym_boxes, tol)
+    segs = clip_segments(wires, sym_boxes, tol, edge=P.get("clip_edge", 1.5) * sw)
     segs = [[float(v) for v in sg] for sg in segs]
     uf, used, _ = connect(segs, dots, tol)
 
@@ -643,9 +718,26 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
                 dx = np.maximum(np.maximum(SB[:, 0] - x, 0), x - SB[:, 2])
                 dy = np.maximum(np.maximum(SB[:, 1] - y, 0), y - SB[:, 3])
                 dist = np.hypot(dx, dy)
-                k = int(np.argmin(dist))
+                cost = dist.copy()
+                if P.get("pin_dir", 1):
+                    # провод входит в вывод по своей оси: символ должен лежать по ходу провода (за концом)
+                    # и на его линии; символ сбоку от конца — скорее сосед
+                    horiz = y0 == y1
+                    out = -1 if end == 0 else 1                    # наружу от отрезка
+                    if horiz:
+                        on_line = (SB[:, 1] - tol <= y) & (y <= SB[:, 3] + tol)
+                        ahead = ((SB[:, 2] >= x - tol) if out > 0 else (SB[:, 0] <= x + tol))
+                    else:
+                        on_line = (SB[:, 0] - tol <= x) & (x <= SB[:, 2] + tol)
+                        ahead = ((SB[:, 3] >= y - tol) if out > 0 else (SB[:, 1] <= y + tol))
+                    cost = dist + np.where(on_line & ahead, 0.0, tol)
+                k = int(np.argmin(cost))
                 if dist[k] <= P["pin_dist"] * tol:
-                    pins.append({"seg": i, "x": x, "y": y, "symbol": k})
+                    pin = {"seg": i, "x": x, "y": y, "symbol": k}
+                    rest = np.delete(cost, k)
+                    if len(rest) and rest.min() - cost[k] < 0.5 * tol and np.delete(dist, k).min() <= P["pin_dist"] * tol:
+                        pin["ambiguous"] = True                    # другой символ почти так же подходит
+                    pins.append(pin)
                     continue
             tb = min(((box_dist(wd["box"], x, y), k) for k, wd in enumerate(words)), default=(1e9, -1))
             ports.append({"seg": i, "x": x, "y": y, "text": tb[1] if tb[0] <= 6 * sw else None})
@@ -711,7 +803,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     for net in nets:
         res["nets"].append({
             "id": net["id"], "segments": net["segments"],
-            "pins": [{"symbol": symbols[p["symbol"]]["id"], "x": sc(p["x"]), "y": sc(p["y"])} for p in net["pins"]],
+            "pins": [dict({"symbol": symbols[p["symbol"]]["id"], "x": sc(p["x"]), "y": sc(p["y"])},
+                          **({"ambiguous": True} if p.get("ambiguous") else {})) for p in net["pins"]],
             "labels": [f"T{k + 1}" for k in net["labels"]], "dangling": net["dangling"],
         })
     res["_features"] = feats                     # для обучения; в файл не пишется
