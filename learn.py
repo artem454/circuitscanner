@@ -617,14 +617,17 @@ def _cell_xy(cell):
     return col - 1, int(m.group(2)) - 1
 
 
-def _examples_by_box(parts, res):
+def _examples_by_box(parts, res, power_symbols=()):
     """Лист с рамками деталей (netlist после проверки): символ анализатора получает тип детали, рамку
     которой он задевает — ровно одной; символ далеко от всех деталей — «не деталь» (OTHER). Символ
-    у корпуса микросхемы или разъёма — скорее обрывок ножек/надписей, его не размечаем."""
+    у корпуса микросхемы — скорее обрывок ножек/надписей, его не размечаем. power_symbols — знаки
+    земли и питания (в netlist это цепи, а не детали): {"type": "GND"|"PORT", "box"} → классы GND/PORT."""
     boxes = []
     for c in parts:
         for b in (c.get("section_boxes") or {"": c["box"]}).values():
             boxes.append((b, TYPE_MAP.get(c.get("type", "X"), "OTHER")))
+    for s in power_symbols:
+        boxes.append((s["box"], "GND" if s.get("type") == "GND" else "PORT"))
     sw = res.get("stroke", 2)
     X, y, Cr = [], [], []
     for sy, f, cr in zip(res["symbols"], res["_features"], res["_crops"]):
@@ -639,7 +642,7 @@ def _examples_by_box(parts, res):
                 hit.append(cls)
             if analyzer.box_dist(b, cx, cy) <= 6 * sw + pad:
                 near = True
-        if len(hit) == 1 and hit[0] not in ("U", "MCU", "TERM", "PORT", "OTHER"):
+        if len(hit) == 1 and hit[0] not in ("U", "MCU", "TERM", "OTHER"):
             X.append(f); y.append(hit[0]); Cr.append(cr)
         elif not hit and not near:
             X.append(f); y.append("OTHER"); Cr.append(cr)
@@ -656,7 +659,7 @@ def real_examples(project, res=None):
     res = res or analyzer.analyze(project, ocr=False)
     parts = [c for c in nl.get("components", []) if c.get("type") not in ("GND", "PORT")]
     if parts and all(c.get("box") for c in parts):
-        return _examples_by_box(parts, res)
+        return _examples_by_box(parts, res, nl.get("power_symbols", []))
     comps = {}
     for c in nl.get("components", []):
         cls = TYPE_MAP.get(c.get("type", "X"), "OTHER")
