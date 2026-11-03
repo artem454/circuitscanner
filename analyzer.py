@@ -1309,7 +1309,72 @@ def classify(res, model=None):
             sy["kind"], sy["kind_conf"] = lab, float(conf)
             if second is not None and second.predict(c, dims, trusted_only=False)[0] != lab:
                 sy["uncertain"] = True          # модель формы не согласна — тип под вопросом
+    if RECT_CONF.get("semi", 1):
+        semiconductor_by_pins(res)
     return True
+
+
+SEMI = {"D", "VS", "Q"}
+
+
+
+
+def semiconductor_by_pins(res):
+    """Диод, тиристор/симистор, транзистор — по расположению выводов (картинка у них похожа, выводы — нет).
+    Классификатор решает, что это полупроводник; здесь — какой:
+      2 вывода друг напротив друга — диод (динистор уже узнан правилом формы);
+      3 вывода, два из них друг напротив друга, третий — сбоку у одного из концов — тиристор/симистор
+        (управляющий электрод у катода);
+      3 вывода, третий посередине перпендикулярно паре, или пары «напротив» нет вовсе — транзистор
+        (база посередине, коллектор и эмиттер расходятся)."""
+    pins = {}
+    for n in res["nets"]:
+        for p in n["pins"]:
+            pins.setdefault(p["symbol"], []).append((p["x"], p["y"]))
+    for sy in res["symbols"]:
+        if sy["kind"] not in SEMI or sy.get("rule") and sy["kind"] == "VS":
+            continue
+        ps = pins.get(sy["id"], [])
+        if len(ps) != 3:
+            continue
+        b = sy["box"]
+        cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        vec = [np.array([x - cx, y - cy], float) for x, y in ps]
+        best = None
+        for i in range(3):
+            for j in range(i + 1, 3):
+                ni, nj = np.linalg.norm(vec[i]), np.linalg.norm(vec[j])
+                if ni < 1e-6 or nj < 1e-6:
+                    continue
+                ang = np.degrees(np.arccos(np.clip(vec[i] @ vec[j] / (ni * nj), -1, 1)))
+                if best is None or ang > best[0]:
+                    best = (ang, i, j)
+        if best is None:
+            continue
+        ang, i, j = best
+        k = 3 - i - j
+        if ang < RECT_CONF.get("semi_opp", 150):
+            if not RECT_CONF.get("semi_q", 0):
+                continue
+            new = "Q"                                    # пары «напротив» нет: коллектор и эмиттер расходятся от базы
+        else:
+            pi, pj, pk = (np.array(ps[q], float) for q in (i, j, k))
+            axis = pj - pi
+            L = np.linalg.norm(axis) + 1e-6
+            u = axis / L
+            rel = pk - (pi + pj) / 2
+            t = abs(rel @ u) / (L / 2)                   # 0 — посередине, 1 — у конца
+            side = abs(rel[0] * u[1] - rel[1] * u[0])    # насколько вывод отходит вбок от оси
+            if t <= RECT_CONF.get("semi_mid", 0.35):
+                if not RECT_CONF.get("semi_q", 0):
+                    continue
+                new = "Q"                                # третий вывод посередине — база
+            elif t >= RECT_CONF.get("semi_end", 0.5) and side >= RECT_CONF.get("semi_side", 0.25) * L                     and sy["kind"] == "D":
+                new = "VS"                               # третий у конца и вбок — управляющий электрод
+            else:
+                continue
+        if new != sy["kind"]:
+            sy["kind"], sy["semi_from"] = new, sy["kind"]
 
 
 def analyze(project, ocr=True, progress=None, params=None):
