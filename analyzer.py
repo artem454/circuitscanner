@@ -230,6 +230,106 @@ def edge_continuations(ink, box, others, sw, L):
     return n
 
 
+def triac_region(ink, box, sw, P):
+    """Симистор, тиристор-VS, динистор в любом повороте — по расширенной области вокруг символа (символ часто
+    распадается: треугольники отдельно, управляющий электрод отдельно). Две параллельные черты, между ними
+    рисунок, НЕсимметричный относительно оси: два треугольника смотрят в разные стороны (у диода треугольник
+    один и рисунок симметричен). Залитые и пустые треугольники — одинаково. Возвращает рамку области или None."""
+    x0, y0, x1, y1 = (int(v) for v in box)
+    Lb = max(x1 - x0, y1 - y0)
+    if Lb < 4 * sw:
+        return None
+    pad = int(P.get("vs_pad", 0.5) * Lb)
+    X0, Y0 = max(0, x0 - pad), max(0, y0 - pad)
+    X1, Y1 = min(ink.shape[1] - 1, x1 + pad), min(ink.shape[0] - 1, y1 + pad)
+    c0 = ink[Y0:Y1 + 1, X0:X1 + 1] > 0
+    for t, c in ((False, c0), (True, c0.T)):             # черты — столбцы
+        h, w = c.shape
+        best = []
+        for x in range(w):                               # самый длинный вертикальный отрезок в столбце
+            d = np.diff(np.concatenate(([0], c[:, x].astype(np.int8), [0])))
+            st, en = np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]
+            if len(st):
+                k = int(np.argmax(en - st))
+                best.append((int(en[k] - st[k]), int(st[k]), int(en[k])))
+            else:
+                best.append((0, 0, 0))
+        bars, x = [], 0
+        while x < w:                                     # полосы столбцов-черт длиной ≥ половины символа
+            if best[x][0] >= 0.5 * Lb and best[x][0] <= 1.6 * Lb:
+                a = x
+                while x < w and best[x][0] >= 0.5 * Lb:
+                    x += 1
+                if x - a <= 3 * sw:
+                    seg = max(best[a:x])
+                    bars.append((a, x - 1, seg[1], seg[2]))
+            else:
+                x += 1
+        for i in range(len(bars)):
+            for j in range(i + 1, len(bars)):
+                a0, a1, ra0, ra1 = bars[i]
+                b0, b1, rb0, rb1 = bars[j]
+                la, lb = ra1 - ra0, rb1 - rb0
+                gapw = b0 - a1 - 1
+                if not 0.3 * max(la, lb) <= gapw <= 1.3 * max(la, lb):
+                    continue
+                if min(la, lb) < 0.6 * max(la, lb) or min(ra1, rb1) - max(ra0, rb0) < 0.6 * min(la, lb):
+                    continue                             # черты разной длины или не друг напротив друга
+                r0, r1 = max(ra0, rb0), min(ra1, rb1)
+                # промежуток между чертами (в координатах листа) — в основном внутри самого символа
+                gx0, gx1 = a1 + int(sw) + 1, b0 - int(sw)
+                G = [gx0, r0, gx1, r1] if not t else [r0, gx0, r1, gx1]
+                G = [X0 + G[0], Y0 + G[1], X0 + G[2], Y0 + G[3]]
+                ix = max(0, min(G[2], x1) - max(G[0], x0)) * max(0, min(G[3], y1) - max(G[1], y0))
+                if ix < P.get("vs_own", 0.5) * max(1, (G[2] - G[0]) * (G[3] - G[1])):
+                    continue
+                # черта прямая: все её столбцы начинаются и кончаются на одной высоте (у дуги — на разной)
+                ok = True
+                for u, v in ((a0, a1), (b0, b1)):
+                    st_ = [best[x][1] for x in range(u, v + 1) if best[x][0] >= 0.5 * Lb]
+                    en_ = [best[x][2] for x in range(u, v + 1) if best[x][0] >= 0.5 * Lb]
+                    if max(st_) - min(st_) > 1.5 * sw or max(en_) - min(en_) > 1.5 * sw:
+                        ok = False
+                if not ok:
+                    continue
+                # концы черт свободны: у корпуса-прямоугольника их соединяют верх и низ
+                gx0_, gx1_ = a1 + int(sw) + 1, b0 - int(sw)
+                if gx1_ > gx0_:
+                    edge = max(c[max(0, r):r + 1 + int(sw), gx0_:gx1_].any(axis=0).mean()
+                               for r in (max(0, r0 - int(sw)), max(0, r1 - int(sw))))
+                    if edge >= P.get("vs_edge", 0.7):
+                        continue
+                # черты прямые: чуть внутрь от черты линия уже короткая (у дуги окружности — почти такая же)
+                bar_run = min(max(b_[0] for b_ in best[a0:a1 + 1]), max(b_[0] for b_ in best[b0:b1 + 1]))
+                ins = [best[min(w - 1, a1 + int(sw) + 1)][0], best[max(0, b0 - int(sw) - 1)][0]]
+                if max(ins) >= P.get("vs_straight", 0.6) * bar_run:
+                    continue
+                g = c[r0:r1, a1 + int(sw) + 1:b0 - int(sw)]
+                if g.size == 0 or g.mean() < P.get("vs_fill", 0.08):
+                    continue                             # между чертами пусто — конденсатор
+                # поворот на 180° вокруг центра рисунка: два треугольника навстречу переходят сами в себя,
+                # а треугольник диода меняет направление
+                ys_, xs_ = np.nonzero(g)
+                cy, cx = int(round(ys_.mean())), int(round(xs_.mean()))
+                hh = min(cy, g.shape[0] - 1 - cy)
+                ww = min(cx, g.shape[1] - 1 - cx)
+                if hh < 2 * sw or ww < P.get("vs_minw", 1.6) * sw:
+                    continue                             # узкий промежуток: наклонные стороны после поворота совпадают
+                win = g[cy - hh:cy + hh + 1, cx - ww:cx + ww + 1].copy()
+                mid = win.shape[0] // 2
+                win[max(0, mid - int(sw)):mid + int(sw) + 1] = False   # провод по оси не считаем
+                if win.sum() < 4 * sw * sw:
+                    continue
+                d = cv2.dilate(win.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0   # допуск в пиксель
+                rot = win[::-1, ::-1]
+                miss = (rot & ~d).sum() / (rot.sum() + 1e-6)
+                if miss > P.get("vs_rot", 0.35):
+                    continue                             # не переходит в себя при повороте — диод
+                bx = [a0, r0, b1, r1] if not t else [r0, a0, r1, b1]
+                return [X0 + bx[0] - pad // 2, Y0 + bx[1] - pad // 2, X0 + bx[2] + pad // 2, Y0 + bx[3] + pad // 2]
+    return None
+
+
 P_ZIG_FLIPS = 4
 
 
@@ -1093,7 +1193,41 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
                     p["symbol"] -= 1
             ka = ka if ka < kb else ka - 1
         symbols[ka]["kind"], symbols[ka]["rule"] = "C", True
+    if P.get("vs_merge", 1):
+        # симистор/тиристор: куски в его области (второй треугольник, управляющий электрод) — одна деталь;
+        # после привязки выводов — вывод управляющего электрода переходит к симистору
+        k = 0
+        while k < len(symbols):
+            reg = symbols[k].get("vs_region")
+            if reg is None:
+                k += 1
+                continue
+            j = 0
+            while j < len(symbols):
+                o = symbols[j]
+                ox, oy = (o["box"][0] + o["box"][2]) / 2, (o["box"][1] + o["box"][3]) / 2
+                if (j != k and o["kind"] == "?" and not o.get("port") and "cells" not in o
+                        and reg[0] <= ox <= reg[2] and reg[1] <= oy <= reg[3]):
+                    b, ob = symbols[k]["box"], o["box"]
+                    symbols[k]["box"] = [min(b[0], ob[0]), min(b[1], ob[1]), max(b[2], ob[2]), max(b[3], ob[3])]
+                    del symbols[j]
+                    for p in pins:
+                        if p["symbol"] == j:
+                            p["symbol"] = k if k < j else k - 1
+                        elif p["symbol"] > j:
+                            p["symbol"] -= 1
+                    if j < k:
+                        k -= 1
+                    continue
+                j += 1
+            k += 1
     two_lead_resistors(symbols, pins, W, H)
+    if P.get("triac", 1):
+        for sy in symbols:
+            if sy["kind"] == "?" and not sy.get("rule"):
+                reg = triac_region(work, sy["box"], sw, P)
+                if reg is not None:
+                    sy["kind"], sy["rule"], sy["vs_region"] = "VS", True, reg
     if P.get("zigzag", 1):
         for sy in symbols:
             if sy["kind"] == "?" and is_zigzag(work, sy["box"], sw):
