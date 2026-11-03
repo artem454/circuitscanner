@@ -430,9 +430,12 @@ def clip_segments(segs, boxes, keep_len, edge=0):
             nxt = []
             for p in pieces:
                 x0, y0, x1, y1 = p
-                if y0 == y1 and x0 < b[0] and x1 > b[2] and min(y0 - b[1], b[3] - y0) <= edge:
+                # у края — и далеко от середины: у узкой рамки (тонкий резистор) ось символа тоже «у края»
+                if (y0 == y1 and x0 < b[0] and x1 > b[2] and min(y0 - b[1], b[3] - y0) <= edge
+                        and abs(y0 - (b[1] + b[3]) / 2) >= 0.3 * (b[3] - b[1])):
                     nxt.append(p)
-                elif x0 == x1 and y0 < b[1] and y1 > b[3] and min(x0 - b[0], b[2] - x0) <= edge:
+                elif (x0 == x1 and y0 < b[1] and y1 > b[3] and min(x0 - b[0], b[2] - x0) <= edge
+                        and abs(x0 - (b[0] + b[2]) / 2) >= 0.3 * (b[2] - b[0])):
                     nxt.append(p)
                 elif y0 == y1 and b[1] <= y0 <= b[3] and x0 < b[2] and x1 > b[0]:
                     if x0 < b[0]:
@@ -608,7 +611,11 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         ink = binarize(gray)
         sw = stroke_width(ink)
     tol = P["tol"] * sw + 2
-    min_len = int(max(P["min_len"] * sw, 12))
+    # на толстом чертеже (линия ~1 % листа) пороги «в толщинах линии» становятся слишком большими:
+    # короткие выводы между деталями не считаются проводами, а мелкие точки — точками. Ограничиваем
+    # их размером листа; на обычных листах ограничение не срабатывает
+    min_len = int(max(min(P["min_len"] * sw, P.get("len_cap", 1) * max(W, H)), 12))   # len_cap выключен: помогал одному листу, вредил другому
+    sw_dot = min(sw, P.get("dot_cap", 0.0045) * max(W, H)) if P.get("dot_cap", 0.0045) else sw
 
     step("надписи")
     words, text_mask = find_text(ink, sw, P)
@@ -627,7 +634,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     vmask = cv2.morphologyEx(lines_src, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (1, min_len)))
     hw, hp = line_segments(hmask, True, sw, min_len, P)
     vw, vp = line_segments(vmask, False, sw, min_len, P)
-    dots = find_dots(work, sw, P)
+    dots = find_dots(work, max(1, int(round(sw_dot))), P)
 
     hw, vw = drop_frame(hw, vw, W, H, tol), drop_frame_v(vw, W, H, hw, tol)
     hw, vw = drop_dashed(hw, 0, sw, min_len), drop_dashed(vw, 1, sw, min_len)

@@ -86,7 +86,8 @@ def score(res, truth):
                    nets=[dict(n, pins=[p for p in n["pins"] if p["symbol"] not in skip]) for n in res["nets"]])
     an_pins = [(p["x"], p["y"], n["id"], p["symbol"]) for n in res["nets"] for p in n["pins"]]
     A = np.array([(x, y) for x, y, _, _ in an_pins]).reshape(-1, 2)
-    R = max(8.0, 4 * res["stroke"])
+    # на проверенном листе точки выводов поставлены по картинке на глаз (± полдюжины пикселей) — допуск шире
+    R = max(16.0, 8 * res["stroke"]) if truth.get("loose") else max(8.0, 4 * res["stroke"])
     taken = set()
     pred = []
     # неподключённые выводы (цепь из одного вывода) находить не нужно
@@ -355,7 +356,7 @@ def truth_from_netlist(nl):
     for c in comps:                                    # микросхема из секций — каждая секция своим символом
         for s, b in (c.get("section_boxes") or {"": c["box"]}).items():
             out.append({"type": c.get("type"), "ref": f"{c.get('ref')}.{s}" if s else c.get("ref"), "box": b})
-    return {"comps": out, "pins": pins, "parts_only": True}
+    return {"comps": out, "pins": pins, "parts_only": True, "loose": True}
 
 
 def _real_one(args):
@@ -368,7 +369,9 @@ def _real_one(args):
     man = core.load_json(project / "manifest.json")
     nl = core.load_json(project / "netlist.json")
     truth = truth_from_netlist(nl)
-    # лист с точками выводов — та же строгая оценка, что на синтетике; иначе — слабая, по клеткам
+    # лист с точками выводов — та же строгая оценка, что на синтетике; иначе — слабая, по клеткам.
+    # (Объединять цепи по знакам земли и меткам, как autonet, пробовали: F1 0.575 → 0.499 — классификатор
+    # принимает за землю чужие символы, OCR путает метки, склеиваются чужие цепи.)
     s = score(res, truth)["score"] if truth else score_real(res, nl, man["grid"]["cell"])
     if str(project) not in _BASE_DOTS:
         _BASE_DOTS[str(project)] = len(analyzer.analyze_gray(gray, dict(analyzer.DEFAULTS))["dots"])
