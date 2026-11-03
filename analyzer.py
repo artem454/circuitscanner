@@ -798,7 +798,9 @@ def ground_ends(work, ink, segs, sw, P):
     return out
 
 
-def _ground_at(c, full, R, sw, P, wire_len):
+def _bar_at(c, R, sw, P, wire_len):
+    """Короткая черта поперёк провода у его конца (провод входит сверху в середину): концы свободны, над
+    ней пусто. Возвращает (верх, низ, левый край, правый край, длина) или None."""
     def run(r):
         row = c[r]
         if not row[R - 1:R + 2].any():
@@ -816,36 +818,75 @@ def _ground_at(c, full, R, sw, P, wire_len):
     # первая черта у конца провода; следующие черты «лесенки» проверяются ниже, как черты под ней
     r0 = next((r for r in range(lo, hi + 1) if run(r)[0] >= wide), None)
     if r0 is None:
-        return False                                     # нет черты
+        return None                                     # нет черты
     rows = [r0]
     while rows[-1] + 1 < len(c) and run(rows[-1] + 1)[0] >= wide:
         rows.append(rows[-1] + 1)
     if len(rows) > 3 * sw + 1:
-        return False                                     # толстая полоса, а не черта
+        return None                                     # толстая полоса, а не черта
     t, bt = rows[0], rows[-1]
     left = min(run(r)[1] for r in rows)
     right = max(run(r)[2] for r in rows)
     L = right - left + 1
     if L < max(4 * sw, 10) or L > P.get("gnd_maxlen", 25) * sw:
-        return False
+        return None
     # рваный нижний край черты на скане: строки, заполненные хотя бы наполовину, — ещё черта
     while bt + 1 < len(c) and bt - t < 3 * sw and c[bt + 1, left:right + 1].sum() >= 0.5 * L:
         bt += 1
     if abs((left + right) / 2 - R) > 0.2 * L + 1:
-        return False                                     # провод не в середину черты (угол провода)
+        return None                                     # провод не в середину черты (угол провода)
     if wire_len < P.get("gnd_wire", 0.25) * L:
-        return False                                     # короткий штрих (плюс у электролита)
+        return None                                     # короткий штрих (плюс у электролита)
     m = max(1, int(round(sw)))
     # концы черты свободны
     side = int(2 * sw) + 1
     if c[t - m:bt + m + 1, left - side:left].any() or c[t - m:bt + m + 1, right + 1:right + 1 + side].any():
-        return False
+        return None
     # над чертой пусто, кроме самого провода
     up = c[max(0, t - int(P.get("gnd_up", 0.3) * L)):t - m, left - m:right + m + 1].copy()
     wc = R - (left - m)
     up[:, max(0, wc - int(1.5 * sw) - 1):wc + int(1.5 * sw) + 2] = 0
     if up.sum() > 2 * sw * sw:
+        return None
+    return t, bt, left, right, L
+
+
+def term_ends(work, ink, segs, sw, P):
+    """Концы проводов, которые кончаются клеммой «⊤» с подписью (+12V, A, B, N): короткая черта поперёк
+    провода, концы свободны, а за чертой — надпись и никаких линий. Вниз так рисуют землю — её не трогаем."""
+    Hh, Ww = work.shape
+    R = int(P.get("gnd_maxlen", 25) * sw) + 2
+    pad = np.zeros((Hh + 2 * R, Ww + 2 * R), np.uint8)
+    pad[R:R + Hh, R:R + Ww] = np.where(work > 0, 1, np.where(ink > 0, 2, 0))
+    out = []
+    for i, (x0, y0, x1, y1) in enumerate(segs):
+        horiz = y0 == y1
+        for end, (x, y) in enumerate(((x0, y0), (x1, y1))):
+            if not horiz and end == 1:
+                continue                                 # черта под проводом — земля
+            cx, cy = int(round(x)) + R, int(round(y)) + R
+            c = np.rot90(pad[cy - R:cy + R + 1, cx - R:cx + R + 1], (1 if end == 0 else -1) if horiz else 2)
+            bar = _bar_at(c == 1, R, sw, P, abs(x1 - x0) + abs(y1 - y0))
+            if bar is None:
+                continue
+            t, bt, left, right, L = bar
+            if abs(x1 - x0) + abs(y1 - y0) < P.get("term_wire", 1.0) * L:
+                continue                                 # короткий штрих (плюс у электролита)
+            reg = c[bt + 1:bt + 1 + int(1.5 * L), max(0, R - L):R + L + 1]
+            text = int((reg == 2).sum())
+            lines = int((reg == 1).sum())
+            if text >= P.get("term_text", 3) * sw * sw and lines <= 2 * sw * sw:
+                out.append((i, end))
+    return out
+
+
+def _ground_at(c, full, R, sw, P, wire_len):
+    bar = _bar_at(c, R, sw, P, wire_len)
+    if bar is None:
         return False
+    t, bt, left, right, L = bar
+    m = max(1, int(round(sw)))
+    wc = R - (left - m)
     # за чертой — только более короткие черты по центру
     # вплотную под чертой смотрим и на «надписи»: подпись GND стоит ниже, а обкладка — близко
     near = int(P.get("gnd_near", 0.4) * L)
@@ -1133,6 +1174,19 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
             for i in gsegs[1:]:
                 uf.union(gsegs[0], i)                    # все земли — одна цепь
 
+    if P.get("term_bars", 1):
+        for i, e in term_ends(work, ink, segs, sw, P):
+            x, y = segs[i][2 * e], segs[i][2 * e + 1]
+            p = next((p for p in pins if p["seg"] == i and abs(p["x"] - x) < 1 and abs(p["y"] - y) < 1), None)
+            if p is not None:
+                sy = symbols[p["symbol"]]
+                if sy["kind"] == "?":
+                    sy["kind"], sy["rule"] = "TERM", True    # черта клеммы стала символом
+            else:
+                r_ = 1.5 * sw
+                symbols.append({"box": [int(x - r_), int(y - r_), int(x + r_), int(y + r_)], "kind": "TERM", "port": True})
+                pins.append({"seg": i, "x": x, "y": y, "symbol": len(symbols) - 1})
+
     roots = {}
     for i in range(len(segs)):
         roots.setdefault(uf.find(i), []).append(i)
@@ -1311,6 +1365,15 @@ def classify(res, model=None):
                 sy["uncertain"] = True          # модель формы не согласна — тип под вопросом
     if RECT_CONF.get("semi", 1):
         semiconductor_by_pins(res)
+    if RECT_CONF.get("port_term", 1):
+        # «метка цепи» с одним проводом — почти всегда разъём/клемма (кружок, гнездо): на плате это деталь
+        cnt = {}
+        for n in res["nets"]:
+            for p in n["pins"]:
+                cnt[p["symbol"]] = cnt.get(p["symbol"], 0) + 1
+        for sy in res["symbols"]:
+            if sy["kind"] == "PORT" and cnt.get(sy["id"]) == 1 and not sy.get("rule"):
+                sy["kind"], sy["port_from"] = "TERM", "PORT"
     return True
 
 

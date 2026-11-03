@@ -1,22 +1,7 @@
 {
  "pending": [
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\VS\\bf9fde3bbd62_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\L\\a4756ed76486_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\L\\e986a2de6ff6_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\Q\\155eb18f5adb_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\Q\\9cc0da88207f_project",
-  "C:\\Users\\Artem\\Downloads\\1s7fbxt3uy_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\Q\\26e9696aafc1_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\OPAMP\\13f85bc935b0_project",
-  "C:\\Users\\Artem\\Downloads\\i (1)_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\OPAMP\\2d31786a25c3_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\K\\2d8d99df9621_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\OPAMP\\5f5d59e04aca_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\K\\87c06120d367_project",
   "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\K\\5dc18c9d663f_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\L\\b78709b16a31_project",
-  "C:\\Users\\Artem\\Downloads\\img-BdqDc8_project",
-  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\VS\\243ce8d883f1_project"
+  "C:\\Users\\Artem\\Downloads\\схемы_яндекс_2_projects\\L\\e986a2de6ff6_project"
  ],
  "history": [
   {
@@ -489,6 +474,117 @@
     "SW_NO": [
      0.0,
      7
+    ]
+   }
+  },
+  {
+   "gen": 8,
+   "time": "2026-11-03 21:40:57",
+   "schematics": 3161,
+   "symbols": 153295,
+   "user": 41,
+   "by_generation": 15274,
+   "unknown": 137980,
+   "new": 7752,
+   "revoked": 927,
+   "resolved_pct": 10.0,
+   "blocked": [
+    "BTN",
+    "COIL",
+    "LAMP",
+    "LOGIC",
+    "MOTOR",
+    "OC",
+    "OPAMP",
+    "Q"
+   ],
+   "precision_before": 0.554,
+   "precision_after": 0.536,
+   "rejected": false,
+   "by_hint": 1186,
+   "hint_check_n": 548,
+   "hint_acc_before": 0.483,
+   "hint_acc_after": 0.499,
+   "hint_classes": [
+    "BTN",
+    "C",
+    "D",
+    "L",
+    "LOGIC",
+    "OPAMP",
+    "QF",
+    "R",
+    "RT"
+   ],
+   "data": [
+    3161,
+    41,
+    15923,
+    3506
+   ],
+   "class_precision": {
+    "C": 0.7,
+    "COIL": 0.0,
+    "D": 0.61,
+    "L": 1.0,
+    "MOTOR": 1.0,
+    "OPAMP": 0.0,
+    "Q": 0.5,
+    "R": 0.91,
+    "SW_NO": 0.83
+   },
+   "hint_class_precision": {
+    "BTN": [
+     1.0,
+     4
+    ],
+    "C": [
+     0.86,
+     591
+    ],
+    "COIL": [
+     0.0,
+     8
+    ],
+    "D": [
+     0.8,
+     228
+    ],
+    "L": [
+     0.82,
+     169
+    ],
+    "LAMP": [
+     0.0,
+     5
+    ],
+    "LOGIC": [
+     1.0,
+     1
+    ],
+    "MOTOR": [
+     0.0,
+     3
+    ],
+    "OC": [
+     0.0,
+     1
+    ],
+    "OPAMP": [
+     0.41,
+     94
+    ],
+    "Q": [
+     0.0,
+     27
+    ],
+    "R": [
+     0.96,
+     179
+    ],
+    "SW_NO": [
+     0.0,
+     5
     ]
    }
   }
