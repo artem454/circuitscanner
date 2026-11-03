@@ -230,6 +230,37 @@ def edge_continuations(ink, box, others, sw, L):
     return n
 
 
+P_ZIG_FLIPS = 4
+
+
+def is_zigzag(ink, box, sw):
+    """Резистор-зигзаг в любом повороте: вдоль длинной оси штрихи много раз пересекают ось и уходят
+    по обе стороны от неё. У катушки дуги с одной стороны, у конденсатора пересечений нет."""
+    x0, y0, x1, y1 = (int(v) for v in box)
+    c = ink[max(0, y0):y1 + 1, max(0, x0):x1 + 1] > 0
+    if c.size == 0:
+        return False
+    if c.shape[0] > c.shape[1]:
+        c = c.T                                          # длинная ось — по горизонтали
+    h, w = c.shape
+    if w < 1.5 * h or h < 3 * sw:
+        return False
+
+    # средний уровень чернил в каждом столбце относительно оси: у зигзага он перескакивает
+    # сверху вниз много раз; у катушки — всегда с одной стороны (или посередине у петель)
+    ys = np.arange(h)[:, None]
+    cnt = c.sum(axis=0)
+    cols = [x for x in range(int(0.1 * w), int(0.9 * w)) if cnt[x]]
+    if len(cols) < 0.6 * 0.8 * w:
+        return False
+    lev = [(float((ys[:, 0] * c[:, x]).sum()) / cnt[x] - (h - 1) / 2) / (h / 2) for x in cols]
+    side = [1 if v > 0.3 else -1 for v in lev if abs(v) > 0.3]
+    if len(side) < 0.5 * len(cols):
+        return False
+    flips = sum(1 for a, b in zip(side, side[1:]) if a != b)
+    return flips >= P_ZIG_FLIPS and side.count(1) >= 0.25 * len(side) and side.count(-1) >= 0.25 * len(side)
+
+
 def two_lead_resistors(symbols, pins, W, H):
     """Небольшой корпус-прямоугольник с ровно двумя выводами: выводы на противоположных
     коротких сторонах — резистор (даже если тонкие линии не дали сработать порогу по толщине
@@ -1021,6 +1052,10 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
             net["dangling"] += 1
 
     two_lead_resistors(symbols, pins, W, H)
+    if P.get("zigzag", 1):
+        for sy in symbols:
+            if sy["kind"] == "?" and is_zigzag(work, sy["box"], sw):
+                sy["kind"], sy["rule"] = "R", True       # американский резистор в любом повороте
     texts_ok = try_ocr(gray, words) if ocr else False
     import symclass
     feats, crops = [], []
