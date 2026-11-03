@@ -851,6 +851,38 @@ def _bar_at(c, R, sw, P, wire_len):
     return t, bt, left, right, L
 
 
+def _chevron_at(c, R, sw, P, wire_len):
+    """Разъём-стрелка «<» или вилка «>»: провод входит сверху и кончается в вершине, от которой вниз
+    симметрично расходятся два наклонных штриха; над вершиной (по бокам от провода) пусто."""
+    rows_ok = rows_all = 0
+    arm = 0
+    for d in range(int(2 * sw), int(P.get("gnd_maxlen", 25) * sw)):
+        r = R + d
+        if r >= c.shape[0]:
+            break
+        row = c[r, max(0, R - 3 * d):R + 3 * d + 1]
+        if not row.any():
+            break                                        # штрихи кончились
+        rows_all += 1
+        dd = np.diff(np.concatenate(([0], row.astype(np.int8), [0])))
+        st, en = np.nonzero(dd == 1)[0], np.nonzero(dd == -1)[0]
+        mids = [(a + e - 1) / 2 - min(R, 3 * d) for a, e in zip(st, en)]
+        if len(mids) == 2:
+            lo, hi = mids
+            if lo < 0 < hi and 0.3 * d <= -lo <= 2.5 * d and 0.3 * d <= hi <= 2.5 * d                     and abs(hi + lo) <= max(2 * sw, 0.3 * (hi - lo)):
+                rows_ok += 1
+        arm = d
+    if arm < 4 * sw or rows_all == 0 or rows_ok < 0.7 * rows_all:
+        return False
+    if wire_len < P.get("term_wire", 1.0) * arm:
+        return False
+    m = max(1, int(round(sw)))
+    up = c[max(0, R - arm):R - 2 * m, max(0, R - 2 * arm):R + 2 * arm + 1].copy()
+    wc = min(R, 2 * arm)
+    up[:, max(0, wc - int(1.5 * sw) - 1):wc + int(1.5 * sw) + 2] = 0
+    return up.sum() <= 2 * sw * sw                       # за вершиной ничего, кроме провода
+
+
 def term_ends(work, ink, segs, sw, P):
     """Концы проводов, которые кончаются клеммой «⊤» с подписью (+12V, A, B, N): короткая черта поперёк
     провода, концы свободны, а за чертой — надпись и никаких линий. Вниз так рисуют землю — её не трогаем."""
@@ -868,6 +900,8 @@ def term_ends(work, ink, segs, sw, P):
             c = np.rot90(pad[cy - R:cy + R + 1, cx - R:cx + R + 1], (1 if end == 0 else -1) if horiz else 2)
             bar = _bar_at(c == 1, R, sw, P, abs(x1 - x0) + abs(y1 - y0))
             if bar is None:
+                if P.get("term_chevron", 1) and _chevron_at(c == 1, R, sw, P, abs(x1 - x0) + abs(y1 - y0)):
+                    out.append((i, end))                 # стрелка «<» / вилка «>» на конце провода
                 continue
             t, bt, left, right, L = bar
             if abs(x1 - x0) + abs(y1 - y0) < P.get("term_wire", 1.0) * L:
@@ -1180,8 +1214,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
             p = next((p for p in pins if p["seg"] == i and abs(p["x"] - x) < 1 and abs(p["y"] - y) < 1), None)
             if p is not None:
                 sy = symbols[p["symbol"]]
-                if sy["kind"] == "?":
-                    sy["kind"], sy["rule"] = "TERM", True    # черта клеммы стала символом
+                if sy["kind"] == "?" and not sy.get("rule"):
+                    sy["kind"], sy["rule"] = "TERM", True    # черта/стрелка клеммы стала символом
             else:
                 r_ = 1.5 * sw
                 symbols.append({"box": [int(x - r_), int(y - r_), int(x + r_), int(y + r_)], "kind": "TERM", "port": True})
