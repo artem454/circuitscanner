@@ -526,6 +526,98 @@ def connect(segs, dots, tol):
     return uf, used, hit
 
 
+def ground_ends(work, ink, segs, sw, P):
+    """Концы проводов, которые кончаются знаком земли: провод упирается в середину короткой черты
+    поперёк себя, концы черты свободны, над чертой (по бокам от провода) пусто, а за чертой — пусто
+    или только более короткие черты по центру (знак из 2–3 черт). Так не подходят обкладка конденсатора
+    (за ней вторая такой же длины), полоска диода (за ней треугольник), база транзистора (за ней выводы),
+    батарея (за короткой чертой провод идёт дальше). Возвращает [(отрезок, конец)]."""
+    Hh, Ww = work.shape
+    Lmax = P.get("gnd_maxlen", 25) * sw
+    R = int(Lmax) + 2
+    pad = np.zeros((Hh + 2 * R, Ww + 2 * R), np.uint8)
+    # 1 — линии; 2 — то, что сочли надписью (иногда это обкладка конденсатора рядом с «+»)
+    pad[R:R + Hh, R:R + Ww] = np.where(work > 0, 1, np.where(ink > 0, 2, 0))
+    out = []
+    for i, (x0, y0, x1, y1) in enumerate(segs):
+        horiz = y0 == y1
+        for end, (x, y) in enumerate(((x0, y0), (x1, y1))):
+            if P.get("gnd_down", 1) and (horiz or end == 0):
+                continue                                 # земля рисуется вниз; черта над проводом — знак питания
+            cx, cy = int(round(x)) + R, int(round(y)) + R
+            c = pad[cy - R:cy + R + 1, cx - R:cx + R + 1]
+            # повернуть так, чтобы провод входил сверху, а конец был в центре
+            k = (1 if end == 0 else -1) if horiz else (2 if end == 0 else 0)
+            c = np.rot90(c, k)
+            if _ground_at(c == 1, c > 0, R, sw, P, abs(x1 - x0) + abs(y1 - y0)):
+                out.append((i, end))
+    return out
+
+
+def _ground_at(c, full, R, sw, P, wire_len):
+    def run(r):
+        row = c[r]
+        if not row[R - 1:R + 2].any():
+            return 0, R, R
+        a = R if row[R] else (R - 1 if row[R - 1] else R + 1)
+        b = a
+        while a > 0 and row[a - 1]:
+            a -= 1
+        while b < len(row) - 1 and row[b + 1]:
+            b += 1
+        return b - a + 1, a, b
+
+    wide = max(3 * sw, 6)
+    lo, hi = int(R - 2 * sw - 1), int(R + 3 * sw + 1)
+    rows = [r for r in range(lo, hi + 1) if run(r)[0] >= wide]
+    if not rows or rows[-1] - rows[0] + 1 != len(rows) or len(rows) > 3 * sw + 1:
+        return False                                     # нет черты или она толстая/рваная
+    t, bt = rows[0], rows[-1]
+    left = min(run(r)[1] for r in rows)
+    right = max(run(r)[2] for r in rows)
+    L = right - left + 1
+    if L < max(4 * sw, 10) or L > P.get("gnd_maxlen", 25) * sw:
+        return False
+    if abs((left + right) / 2 - R) > 0.2 * L + 1:
+        return False                                     # провод не в середину черты (угол провода)
+    if wire_len < P.get("gnd_wire", 0.5) * L:
+        return False                                     # короткий штрих (плюс у электролита)
+    m = max(1, int(round(sw)))
+    # концы черты свободны
+    side = int(2 * sw) + 1
+    if c[t - m:bt + m + 1, left - side:left].any() or c[t - m:bt + m + 1, right + 1:right + 1 + side].any():
+        return False
+    # над чертой пусто, кроме самого провода
+    up = c[max(0, t - int(0.5 * L)):t - m, left - m:right + m + 1].copy()
+    wc = R - (left - m)
+    up[:, max(0, wc - int(1.5 * sw) - 1):wc + int(1.5 * sw) + 2] = 0
+    if up.sum() > 2 * sw * sw:
+        return False
+    # за чертой — только более короткие черты по центру
+    # вплотную под чертой смотрим и на «надписи»: подпись GND стоит ниже, а обкладка — близко
+    near = int(P.get("gnd_near", 0.4) * L)
+    down = np.vstack([full[bt + 1:bt + 1 + near, left - m:right + m + 1],
+                      c[bt + 1 + near:bt + 1 + int(P.get("gnd_below", 0.8) * L), left - m:right + m + 1]])
+    prev, r, bands = L, 0, 0
+    inked = down.any(axis=1)
+    while r < len(down):
+        if not inked[r]:
+            r += 1
+            continue
+        r0 = r
+        while r < len(down) and inked[r]:
+            r += 1
+        band = down[r0:r]
+        cols = np.nonzero(band.any(axis=0))[0]
+        w = cols[-1] - cols[0] + 1
+        bands += 1
+        if (bands > 2 or r - r0 > 3 * sw + 1 or r == len(down) or w > 0.85 * prev
+                or abs((cols[0] + cols[-1]) / 2 - wc) > 0.2 * L + sw or band.sum() < 0.6 * w * (r - r0)):
+            return False
+        prev = w
+    return True
+
+
 # ---------- признаки символов (для классификатора) ----------
 
 FEAT = 24
@@ -749,6 +841,19 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
             tb = min(((box_dist(wd["box"], x, y), k) for k, wd in enumerate(words)), default=(1e9, -1))
             ports.append({"seg": i, "x": x, "y": y, "text": tb[1] if tb[0] <= 6 * sw else None})
 
+    gends = set(ground_ends(work, ink, segs, sw, P)) if P.get("ground", 2) else set()
+    if gends:
+        per = {}
+        for p in pins:
+            per.setdefault(p["symbol"], []).append(p)
+        for k, ps in per.items():                        # сама черта, ставшая символом с одним выводом
+            if len(ps) == 1 and symbols[k]["kind"] == "?" and (ps[0]["seg"], 0 if (ps[0]["x"], ps[0]["y"]) == tuple(segs[ps[0]["seg"]][:2]) else 1) in gends:
+                symbols[k]["kind"], symbols[k]["rule"] = "GND", True
+        if P.get("ground", 2) >= 2:
+            gsegs = sorted({i for i, _ in gends})
+            for i in gsegs[1:]:
+                uf.union(gsegs[0], i)                    # все земли — одна цепь
+
     roots = {}
     for i in range(len(segs)):
         roots.setdefault(uf.find(i), []).append(i)
@@ -800,13 +905,15 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         "segments": [[sc(v) for v in sg] for sg in segs],
         "dots": [[sc(x), sc(y)] for x, y, _ in dots],
         "texts": [], "symbols": [], "nets": [],
+        "grounds": [[sc(v) for v in segs[i][2 * e:2 * e + 2]] for i, e in sorted(gends)],
     }
     for k, wd in enumerate(words):
         res["texts"].append({"id": f"T{k + 1}", "box": [sc(v) for v in wd["box"]], "vertical": wd["vertical"],
                              "text": wd.get("text", ""), "conf": wd.get("conf")})
     for sy in symbols:
-        res["symbols"].append({"id": sy["id"], "kind": sy["kind"], "box": [sc(v) for v in sy["box"]],
-                               "near_text": [f"T{k + 1}" for k in sy["near_text"]]})
+        res["symbols"].append(dict({"id": sy["id"], "kind": sy["kind"], "box": [sc(v) for v in sy["box"]],
+                                    "near_text": [f"T{k + 1}" for k in sy["near_text"]]},
+                                   **({"rule": True} if sy.get("rule") else {})))   # знак земли найден правилом
     for net in nets:
         res["nets"].append({
             "id": net["id"], "segments": net["segments"],
@@ -833,7 +940,7 @@ def classify(res, model=None):
     if not model.ready():
         return False
     for sy, f, (c, dims) in zip(res["symbols"], res["_features"], res["_crops"]):
-        if sy["kind"] in ("R", "U"):
+        if sy["kind"] in ("R", "U", "GND"):
             continue
         lab, conf = model.predict(f)
         if lab != "OTHER":

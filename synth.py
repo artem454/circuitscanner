@@ -874,6 +874,13 @@ def _finish(sh, rng, seed, level):
             truth["pins"].append({"comp": c["id"], "type": c["type"], "pin": p["name"],
                                   "x": float(q[0]), "y": float(q[1]), "ox": float(o[0]), "oy": float(o[1]),
                                   "net": int(p.get("net", 0))})
+    # все знаки земли — одна цепь (провода к ним нарисованы порознь, но схема их соединяет)
+    gnd = {p["net"] for p in truth["pins"] if p["type"] == "GND"}
+    if len(gnd) > 1:
+        g0 = min(gnd)
+        for p in truth["pins"]:
+            if p["net"] in gnd:
+                p["net"] = g0
     return img, truth
 
 
