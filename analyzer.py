@@ -419,6 +419,26 @@ def drop_through_text(segs, words, sw):
     return out
 
 
+def drop_faint(hw, vw, gray, ink, P):
+    """Бледные линии — рамки-подсветки блоков, сетка, тени — не провода: провод того же цвета, что и
+    остальной чертёж. Отрезок, чья темнота заметно меньше обычной темноты линий листа, отбрасываем."""
+    # темнота линии — по самой тёмной точке поперёк неё (на размытом скане середина тонкой линии серая)
+    sw = stroke_width(ink)
+    k = int(2 * sw + 1) | 1
+    gray = cv2.erode(gray, np.ones((k, k), np.uint8))
+    dark = 255 - float(np.median(gray[ink > 0])) if (ink > 0).any() else 0
+    if dark < 60:
+        return hw, vw                                    # весь лист бледный — сравнивать не с чем
+
+    def keep(sg):
+        x0, y0, x1, y1 = (int(round(v)) for v in sg)
+        n = max(2, int(max(abs(x1 - x0), abs(y1 - y0)) // 2))
+        xs = np.clip(np.linspace(x0, x1, n).astype(int), 0, gray.shape[1] - 1)
+        ys = np.clip(np.linspace(y0, y1, n).astype(int), 0, gray.shape[0] - 1)
+        return 255 - float(np.median(gray[ys, xs])) >= P.get("faint_k", 0.6) * dark
+    return [sg for sg in hw if keep(sg)], [sg for sg in vw if keep(sg)]
+
+
 def drop_dashed(segs, axis, sw, min_len):
     """Пунктир: ≥4 коротких отрезка на одной прямой с похожими длинами и промежутками."""
     by_line = {}
@@ -834,6 +854,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     hw, vw = drop_frame(hw, vw, W, H, tol), drop_frame_v(vw, W, H, hw, tol)
     hw, vw = drop_dashed(hw, 0, sw, min_len), drop_dashed(vw, 1, sw, min_len)
     hw, vw = drop_through_text(hw, words, sw), drop_through_text(vw, words, sw)
+    if P.get("faint", 1):
+        hw, vw = drop_faint(hw, vw, gray, ink, P)
 
     # короткий отрезок со свободными концами, в середину которого упёрся или
     # который пересёк провод, — штрих символа: полоска диода, обкладка, основание
