@@ -257,16 +257,56 @@ def two_lead_resistors(symbols, pins, W, H):
             sy["kind"] = "C"
 
 
+def hatched_bodies(ink, bits, holes, sw, W, H, P):
+    """Заштрихованный или залитый корпус: штрихи режут «дырку» корпуса на мелкие или (после размытия
+    скана) заливают её целиком. Заливаем мелкие замкнутые дырки, стираем всё тонкое (провода, выводы,
+    штрихи) открытием — остаётся сплошной прямоугольник корпуса."""
+    m = ink.copy()
+    cv2.drawContours(m, bits, -1, 255, -1)
+    k = int(P.get("hatch_open", 2.5) * sw) | 1
+    solid = cv2.morphologyEx(m, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (k, k)))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(solid, connectivity=4)
+    out = []
+    for i in range(1, n):
+        x, y, w, h, area = st[i]
+        lo, hi = min(w, h), max(w, h)
+        if lo < P.get("hatch_min", 3) * sw or lo > 9 * sw or hi < 1.5 * lo or hi > 8 * lo:
+            continue                                     # не похоже на корпус резистора
+        if area < 0.85 * w * h:
+            continue                                     # не прямоугольник
+        # выводы резистора выходят из коротких сторон вдоль корпуса; из середины длинных сторон —
+        # это слипшиеся толстые обкладки конденсатора
+        d, r = int(sw) + 2, max(1, int(sw))
+        cx, cy = x + w // 2, y + h // 2
+
+        def lead(x0, y0, x1, y1):
+            win = ink[max(0, y0):max(0, y1), max(0, x0):max(0, x1)]
+            return bool(win.size) and win.mean() > 0.3 * 255
+        ends = [lead(x - d, cy - r, x - 1, cy + r + 1), lead(x + w + 1, cy - r, x + w + d, cy + r + 1)]
+        sides = [lead(cx - r, y - d, cx + r + 1, y - 1), lead(cx - r, y + h + 1, cx + r + 1, y + h + d)]
+        if h > w:
+            ends, sides = sides, ends
+        if not any(ends) or sum(sides) > sum(ends):
+            continue
+        box = [x - 1, y - 1, x + w + 1, y + h + 1]
+        if any(boxes_near(box, b, 0) for b in holes):
+            continue
+        out.append(box)
+    return out
+
+
 def find_rects(ink, sw, W, H, P):
     """Пустые прямоугольные «дырки» = корпуса резисторов и микросхем."""
     cnts, hier = cv2.findContours(ink, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    holes = []
+    holes, bits = [], []
     if hier is None:
         return []
     for i, c in enumerate(cnts):
         if hier[0][i][3] < 0:
             continue
         x, y, w, h = cv2.boundingRect(c)
+        if max(w, h) <= 12 * sw:
+            bits.append(c)                               # мелкая дырка — может быть ячейкой штриховки
         if w < 3 * sw or h < 3 * sw or max(w, h) > 0.3 * max(W, H):
             continue
         if cv2.contourArea(c) < 0.85 * w * h:
@@ -276,6 +316,8 @@ def find_rects(ink, sw, W, H, P):
         if inner.size and inner.mean() / 255 > P["rect_fill"]:
             continue
         holes.append([x - sw, y - sw, x + w + sw, y + h + sw])
+    if P.get("hatched", 1):
+        holes += hatched_bodies(ink, bits, holes, sw, W, H, P)
     # петля из проводов тоже даёт «дырку» (пересечение замыкает контур), но её
     # стороны уходят дальше за углы; у корпуса стороны обрываются в углах
     L = int(max(P["min_len"] * sw, 12))

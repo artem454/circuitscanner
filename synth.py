@@ -56,6 +56,9 @@ VALUES = {"R": ["10", "22", "100", "270", "470", "1k", "2.2k", "4.7k", "10k", "4
           "L": ["10μ", "100μ", "1m", "47μ", "2.2m"]}
 
 
+HATCH_PROB = 0.15           # доля листов с заштрихованными резисторами
+
+
 def rot(p, c, vertical):
     """Повернуть точку p вокруг c на 90°, если деталь вертикальная."""
     if not vertical:
@@ -82,6 +85,8 @@ def two_pin(sh, kind, cx, cy, vertical, cid):
             body = [(cx - bw / 2, cy - bh / 2), (cx + bw / 2, cy + bh / 2)]
             a, b = L(body[0]), L(body[1])
             sh.rect(min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+            if getattr(sh, "hatch", 0):
+                hatch(sh, min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
         ends = [(cx - bw / 2, cy), (cx + bw / 2, cy)]
         outs = [(cx - bw / 2 - lead, cy), (cx + bw / 2 + lead, cy)]
     elif kind == "C":
@@ -119,6 +124,20 @@ def two_pin(sh, kind, cx, cy, vertical, cid):
     ys = [p["by"] for p in pins] + [cy - 18, cy + 18]
     box = [min(xs), min(ys), max(xs), max(ys)]
     return box, pins
+
+
+def hatch(sh, x0, y0, x1, y1):
+    """Косая штриховка внутри корпуса (так рисуют резисторы в некоторых книгах)."""
+    x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+    sub = np.full((y1 - y0 + 1, x1 - x0 + 1), 255, np.uint8)
+    h, w = sub.shape
+    for k in range(-h, w, sh.hatch):
+        a, b = (k, h - 1), (k + h, 0) if sh.hatch_dir > 0 else (k + h, h - 1)
+        if sh.hatch_dir < 0:
+            a = (k, 0)
+        cv2.line(sub, a, b, INK, max(1, sh.t - 1), cv2.LINE_AA)
+    reg = sh.img[y0:y1 + 1, x0:x1 + 1]
+    reg[:] = np.minimum(reg, sub)
 
 
 def transistor(sh, cx, cy, mirror):
@@ -669,6 +688,10 @@ def generate(seed, hard=None, level=None):
         level = (4 if hard else 3) if hard is not None else rng.choice([1, 2, 3, 3, 4, 4, 5])
     lv = LEVELS[level]
     sh = Sheet(rng, *lv["size"])
+    # заштрихованные корпуса резисторов — из своего генератора, остальной лист не меняется
+    hr = random.Random(seed * 13 + 11)
+    if hr.random() < HATCH_PROB:
+        sh.hatch, sh.hatch_dir = hr.choice([3, 4, 5]) * sh.t, hr.choice([1, -1])
     if level >= 2 and rng.random() < 0.3:                  # лист схемы управления (лестничная разводка)
         ladder(sh, rng, level)
         return _finish(sh, rng, seed, level)
