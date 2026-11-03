@@ -764,7 +764,17 @@ class App(tk.Tk):
             shown += 1
             self.tv_comp.insert("", "end", iid=ref, values=(ref, core.type_label(c.get("type", "")), c.get("value", ""),
                                                            c.get("cell", "")),
-                                tags=("low",) if c.get("confidence") == "low" else ())
+                                tags=("low",) if c.get("confidence") == "low" else (), open=True)
+            # блоки микросхемы (на плате одна деталь) — строками под ней, по клику подсвечивается блок
+            for s, b in (c.get("section_boxes") or {}).items():
+                self.tv_comp.insert(ref, "end", iid=f"{ref}#s{s}",
+                                    values=(f"  {ref}.{s}", core.type_label(c.get("type", "")), "блок",
+                                            self._cell_name(b)))
+        # знаки земли и питания (в схеме это цепи) — тоже в списке, чтобы найти их на схеме
+        for i, s in enumerate(self.netlist.get("power_symbols", []) if self.netlist else []):
+            self.tv_comp.insert("", "end", iid=f"#ps{i}",
+                                values=(s.get("net", s.get("type", "")),
+                                        "земля" if s.get("type") == "GND" else "питание", "знак", s.get("cell", "")))
         if getattr(self, "lbl_found", None):
             self.lbl_found.config(text=f"найдено {shown} из {len(self.comps)}" if q else "")
         meta = self.netlist.get("nets", {})
@@ -1046,10 +1056,27 @@ class App(tk.Tk):
         if not sel:
             return
         ref = sel[0]
+        if ref.startswith("#ps"):                            # знак земли/питания
+            s = self.netlist["power_symbols"][int(ref[3:])]
+            self.hl_refs = set()
+            self.hl_cells = {core.parse_cell(s.get("cell", ""))} - {None}
+            self._set_detail([(f"{s.get('net', '')} — {'земля' if s.get('type') == 'GND' else 'питание'}, "
+                               f"знак на схеме [{s.get('cell', '')}]\n", "h")])
+            return self._focus_cells()
+        if "#s" in ref:                                      # блок микросхемы
+            base, s = ref.split("#s")
+            self.hl_refs = {base}
+            self.hl_cells = {core.parse_cell(self._cell_name(self.comps[base]["section_boxes"][s]))} - {None}
+            self._set_detail(self._comp_text(base))
+            return self._focus_cells()
         self.hl_refs = {ref}
         self.hl_cells = self._cells_of([ref])
         self._set_detail(self._comp_text(ref))
         self._focus_cells()
+
+    def _cell_name(self, box):
+        g = self.manifest["grid"]["cell"] if getattr(self, "manifest", None) else 1
+        return f"{core.col_name(int((box[0] + box[2]) / 2 // g))}{int((box[1] + box[3]) / 2 // g) + 1}"
 
     @staticmethod
     def _comp_matches(ref, c, q):
@@ -1146,6 +1173,7 @@ class App(tk.Tk):
             if not sel:
                 return messagebox.showinfo("Исправить деталь", "Выберите деталь в списке (сомнительные — оранжевые).")
             ref = sel[0]
+        ref = ref.split("#s")[0]                             # блок микросхемы → сама микросхема
         c = self.comps.get(ref)
         if not c:
             return
