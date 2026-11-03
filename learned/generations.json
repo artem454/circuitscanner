@@ -1,0 +1,478 @@
+{
+ "pending": [],
+ "history": [
+  {
+   "gen": 1,
+   "time": "2026-11-02 00:16:24",
+   "schematics": 5,
+   "symbols": 874,
+   "user": 17,
+   "by_generation": 12,
+   "unknown": 845,
+   "new": 12,
+   "revoked": 0,
+   "resolved_pct": 3.3,
+   "blocked": [
+    "C",
+    "Q",
+    "SW_NO"
+   ],
+   "precision_before": 0.604,
+   "precision_after": 0.617,
+   "rejected": false,
+   "data": [
+    5,
+    17,
+    4721
+   ],
+   "class_precision": {
+    "C": 0.0,
+    "D": 0.91,
+    "Q": 1.0,
+    "SW_NO": 1.0
+   }
+  },
+  {
+   "gen": 2,
+   "time": "2026-11-02 00:54:33",
+   "schematics": 543,
+   "symbols": 14479,
+   "user": 17,
+   "by_generation": 81,
+   "unknown": 14381,
+   "new": 73,
+   "revoked": 0,
+   "resolved_pct": 0.7,
+   "blocked": [
+    "C",
+    "Q",
+    "SW_NO"
+   ],
+   "precision_before": 0.524,
+   "precision_after": 0.579,
+   "rejected": false,
+   "data": [
+    543,
+    17,
+    4559
+   ],
+   "class_precision": {
+    "C": 1.0,
+    "D": 0.86,
+    "Q": 0.5,
+    "SW_NO": 1.0
+   }
+  },
+  {
+   "gen": 3,
+   "time": "2026-11-02 01:32:05",
+   "schematics": 1610,
+   "symbols": 73816,
+   "user": 17,
+   "by_generation": 469,
+   "unknown": 73330,
+   "new": 388,
+   "revoked": 0,
+   "resolved_pct": 0.7,
+   "blocked": [
+    "Q",
+    "SW_NO"
+   ],
+   "precision_before": 0.579,
+   "precision_after": 0.523,
+   "rejected": true,
+   "data": [
+    1610,
+    17,
+    4632
+   ],
+   "class_precision": {
+    "D": 0.86,
+    "Q": 1.0,
+    "SW_NO": 1.0
+   }
+  },
+  {
+   "gen": 4,
+   "time": "2026-11-02 09:18:37",
+   "schematics": 1610,
+   "symbols": 73816,
+   "user": 17,
+   "by_generation": 1458,
+   "unknown": 72341,
+   "new": 248,
+   "revoked": 5,
+   "resolved_pct": 2.0,
+   "blocked": [
+    "L",
+    "LAMP",
+    "OPAMP",
+    "Q",
+    "SW_NC",
+    "SW_NO"
+   ],
+   "precision_before": 0.579,
+   "precision_after": 0.486,
+   "rejected": false,
+   "by_hint": 402,
+   "hint_check_n": 332,
+   "hint_acc_before": 0.339,
+   "hint_acc_after": 0.458,
+   "hint_classes": [
+    "BTN",
+    "C",
+    "D",
+    "L",
+    "OPAMP",
+    "QF",
+    "R",
+    "RT"
+   ],
+   "data": [
+    1610,
+    17,
+    4632,
+    1772
+   ],
+   "class_precision": {
+    "D": 0.86,
+    "Q": 1.0,
+    "SW_NO": 1.0
+   },
+   "hint_class_precision": {
+    "C": [
+     0.94,
+     124
+    ],
+    "D": [
+     0.91,
+     33
+    ],
+    "L": [
+     0.68,
+     22
+    ],
+    "LAMP": [
+     0.0,
+     5
+    ],
+    "OPAMP": [
+     0.35,
+     26
+    ],
+    "Q": [
+     0.0,
+     2
+    ],
+    "SW_NC": [
+     0.0,
+     1
+    ],
+    "SW_NO": [
+     0.0,
+     4
+    ]
+   }
+  },
+  {
+   "gen": 5,
+   "time": "2026-11-02 09:22:06",
+   "schematics": 1610,
+   "symbols": 73816,
+   "user": 17,
+   "by_generation": 1879,
+   "unknown": 71920,
+   "new": 1043,
+   "revoked": 622,
+   "resolved_pct": 2.6,
+   "blocked": [
+    "BTN",
+    "C",
+    "L",
+    "LAMP",
+    "OPAMP",
+    "Q",
+    "SW_NO"
+   ],
+   "precision_before": 0.486,
+   "precision_after": 0.347,
+   "rejected": true,
+   "by_hint": 496,
+   "hint_check_n": 332,
+   "hint_acc_before": 0.458,
+   "hint_acc_after": 0.474,
+   "hint_classes": [
+    "BTN",
+    "C",
+    "D",
+    "L",
+    "OPAMP",
+    "QF",
+    "R",
+    "RT"
+   ],
+   "data": [
+    1610,
+    17,
+    6009,
+    1772
+   ],
+   "class_precision": {
+    "BTN": 0.0,
+    "C": 0.2,
+    "D": 0.82,
+    "SW_NO": 1.0
+   },
+   "hint_class_precision": {
+    "C": [
+     0.87,
+     250
+    ],
+    "D": [
+     0.93,
+     88
+    ],
+    "L": [
+     0.77,
+     61
+    ],
+    "LAMP": [
+     0.0,
+     5
+    ],
+    "OPAMP": [
+     0.46,
+     59
+    ],
+    "Q": [
+     0.0,
+     3
+    ],
+    "R": [
+     1.0,
+     66
+    ],
+    "SW_NO": [
+     0.0,
+     4
+    ]
+   }
+  },
+  {
+   "gen": 6,
+   "time": "2026-11-02 18:55:46",
+   "schematics": 3165,
+   "symbols": 152648,
+   "user": 17,
+   "by_generation": 3498,
+   "unknown": 149133,
+   "new": 2412,
+   "revoked": 299,
+   "resolved_pct": 2.3,
+   "blocked": [
+    "BTN",
+    "COIL",
+    "LAMP",
+    "MOTOR",
+    "OPAMP",
+    "Q",
+    "R",
+    "RT",
+    "SW_NC",
+    "SW_NO"
+   ],
+   "precision_before": 0.408,
+   "precision_after": 0.3,
+   "rejected": false,
+   "by_hint": 858,
+   "hint_check_n": 573,
+   "hint_acc_before": 0.339,
+   "hint_acc_after": 0.46,
+   "hint_classes": [
+    "BTN",
+    "C",
+    "D",
+    "L",
+    "LOGIC",
+    "OPAMP",
+    "QF",
+    "R",
+    "RT"
+   ],
+   "data": [
+    3165,
+    17,
+    6224,
+    3584
+   ],
+   "class_precision": {
+    "D": 0.86,
+    "SW_NO": 1.0
+   },
+   "hint_class_precision": {
+    "BTN": [
+     1.0,
+     3
+    ],
+    "C": [
+     0.95,
+     277
+    ],
+    "COIL": [
+     0.0,
+     11
+    ],
+    "D": [
+     0.94,
+     113
+    ],
+    "L": [
+     0.89,
+     85
+    ],
+    "LAMP": [
+     0.0,
+     9
+    ],
+    "MOTOR": [
+     0.0,
+     3
+    ],
+    "OPAMP": [
+     0.32,
+     41
+    ],
+    "Q": [
+     0.0,
+     16
+    ],
+    "R": [
+     1.0,
+     6
+    ],
+    "RT": [
+     0.0,
+     2
+    ],
+    "SW_NC": [
+     0.0,
+     4
+    ],
+    "SW_NO": [
+     0.0,
+     7
+    ]
+   }
+  },
+  {
+   "gen": 7,
+   "time": "2026-11-03 19:08:17",
+   "schematics": 3161,
+   "symbols": 152785,
+   "user": 41,
+   "by_generation": 8449,
+   "unknown": 144295,
+   "new": 6,
+   "revoked": 1,
+   "resolved_pct": 5.6,
+   "blocked": [
+    "BTN",
+    "COIL",
+    "LAMP",
+    "LOGIC",
+    "MOTOR",
+    "OPAMP",
+    "SW_NC",
+    "SW_NO"
+   ],
+   "precision_before": 0.511,
+   "precision_after": 0.5,
+   "rejected": false,
+   "by_hint": 1060,
+   "hint_check_n": 559,
+   "hint_acc_before": 0.459,
+   "hint_acc_after": 0.493,
+   "hint_classes": [
+    "BTN",
+    "C",
+    "D",
+    "L",
+    "LOGIC",
+    "OPAMP",
+    "QF",
+    "R",
+    "RT"
+   ],
+   "data": [
+    3161,
+    41,
+    9864,
+    3532
+   ],
+   "class_precision": {
+    "BTN": 1.0,
+    "C": 0.68,
+    "COIL": 0.0,
+    "D": 0.79,
+    "L": 1.0,
+    "OPAMP": 0.0,
+    "Q": 1.0,
+    "SW_NO": 1.0
+   },
+   "hint_class_precision": {
+    "BTN": [
+     1.0,
+     5
+    ],
+    "C": [
+     0.89,
+     504
+    ],
+    "COIL": [
+     0.0,
+     9
+    ],
+    "D": [
+     0.9,
+     189
+    ],
+    "L": [
+     0.85,
+     162
+    ],
+    "LAMP": [
+     0.0,
+     8
+    ],
+    "LOGIC": [
+     1.0,
+     1
+    ],
+    "MOTOR": [
+     0.0,
+     1
+    ],
+    "OPAMP": [
+     0.41,
+     88
+    ],
+    "Q": [
+     0.0,
+     17
+    ],
+    "R": [
+     0.99,
+     99
+    ],
+    "SW_NC": [
+     0.0,
+     2
+    ],
+    "SW_NO": [
+     0.0,
+     7
+    ]
+   }
+  }
+ ]
+}

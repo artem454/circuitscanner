@@ -14,9 +14,7 @@ session/
 learned/pcb_history.jsonl
 learned/pcb_affinity.json
 learned/pool/
-learned/generations.json
-# выученные модели — большие и меняются при каждом обучении; их копии — в ../резервные_копии
-learned/*.npz
+# выученные модели (learned/*.npz) хранятся в git и на GitHub: 3 ноября их потеряли при откате папки
 learned/*.bak
 learned/pool_test/
 learned/reflabels_check.json
