@@ -558,7 +558,7 @@ def clip_segments(segs, boxes, keep_len, edge=0):
     return out
 
 
-def capacitor_plates(wires, used, hit, strokes, sw, min_len, P):
+def capacitor_plates(wires, used, hit, strokes, sw, min_len, P, ink=None):
     """Обкладки конденсатора, слишком длинные для «штриха»: два параллельных отрезка похожей длины
     друг напротив друга, близко, концы свободны, и в середину каждого упёрся провод. Иначе обкладки
     остаются проводами, провод к ним просто примыкает — и конденсатор со своими выводами пропадает."""
@@ -583,8 +583,19 @@ def capacitor_plates(wires, used, hit, strokes, sw, min_len, P):
                 continue                                 # не друг напротив друга
             if not sw <= abs(ay - by) <= P.get("cap_gap", 0.6) * max(la, lb):
                 continue                                 # слишком далеко (или это одна линия)
-            out.update((a, b))
+            out.update((a, b))                           # штрихи символа в любом случае
+            if ink is not None:
+                # конденсатор — только если между обкладками пусто; у симистора, динистора там треугольники
+                lo, hi = int(max(ax0, bx0)), int(min(ax1, bx1))
+                g0, g1 = int(min(ay, by) + 1.5 * sw + 1), int(max(ay, by) - 1.5 * sw)   # без краёв самих обкладок
+                gap = ink[g0:g1, lo:hi + 1] if ha else ink[lo:hi + 1, g0:g1]
+                if gap.size and gap.mean() / 255 > P.get("cap_gap_ink", 0.03):
+                    continue
+            capacitor_plates.pairs.append((list(A), list(B)))
     return out
+
+
+capacitor_plates.pairs = []                              # пары обкладок последнего разбора (для склейки символов)
 
 
 def find_dots(ink, sw, P):
@@ -896,7 +907,9 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
                   if (i, 0) not in used0 and (i, 1) not in used0 and i in hit0
                   and max(sg[2] - sg[0], sg[3] - sg[1]) < P["stroke_len"] * min_len}
     if P.get("cap_pairs", 1):
-        stroke_ids |= capacitor_plates(wires, used0, hit0, stroke_ids, sw, min_len, P)
+        capacitor_plates.pairs = []
+        stroke_ids |= capacitor_plates(wires, used0, hit0, stroke_ids, sw, min_len, P, work)
+    plate_pairs = list(capacitor_plates.pairs) if P.get("cap_pairs", 1) and P.get("cap_merge", 1) else []
     strokes = [wires[i] for i in stroke_ids]
     wires = [sg for i, sg in enumerate(wires) if i not in stroke_ids]
 
@@ -1051,6 +1064,27 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         else:
             net["dangling"] += 1
 
+    # обкладки одного конденсатора, разошедшиеся по двум символам, — один символ «C». Склеиваем после
+    # привязки выводов: увеличенная рамка иначе забирала соседние концы проводов
+    for A, B in plate_pairs:
+        def owner(sg):
+            mx, my = (sg[0] + sg[2]) / 2, (sg[1] + sg[3]) / 2
+            return next((k for k, sy in enumerate(symbols) if sy["kind"] == "?"
+                         and sy["box"][0] <= mx <= sy["box"][2] and sy["box"][1] <= my <= sy["box"][3]), None)
+        ka, kb = owner(A), owner(B)
+        if ka is None or kb is None:
+            continue
+        if ka != kb:
+            ba, bb = symbols[ka]["box"], symbols[kb]["box"]
+            symbols[ka]["box"] = [min(ba[0], bb[0]), min(ba[1], bb[1]), max(ba[2], bb[2]), max(ba[3], bb[3])]
+            del symbols[kb]
+            for p in pins:                               # те же словари лежат и в цепях
+                if p["symbol"] == kb:
+                    p["symbol"] = ka
+                if p["symbol"] > kb:
+                    p["symbol"] -= 1
+            ka = ka if ka < kb else ka - 1
+        symbols[ka]["kind"], symbols[ka]["rule"] = "C", True
     two_lead_resistors(symbols, pins, W, H)
     if P.get("zigzag", 1):
         for sy in symbols:
