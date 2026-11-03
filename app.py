@@ -1053,6 +1053,9 @@ class App(tk.Tk):
 
     def on_comp(self, _=None):
         sel = self.tv_comp.selection()
+        if getattr(self, "_canvas_pick", False):             # выделено щелчком по схеме — подробности уже показаны
+            self._canvas_pick = False
+            return
         if not sel:
             return
         ref = sel[0]
@@ -1384,14 +1387,32 @@ class App(tk.Tk):
     def show_cell(self, cell):
         name = f"{core.col_name(cell[0])}{cell[1] + 1}"
         refs = [r for r, c in self.comps.items() if core.parse_cell(c.get("cell", "")) == cell]
+        rows = list(refs)
+        for r, c in self.comps.items():                       # блоки микросхем в этой клетке
+            for s, b in (c.get("section_boxes") or {}).items():
+                if core.parse_cell(self._cell_name(b)) == cell:
+                    rows.append(f"{r}#s{s}")
+                    if r not in refs:
+                        refs.append(r)
+        syms = [(i, s) for i, s in enumerate((self.netlist or {}).get("power_symbols", []))
+                if core.parse_cell(s.get("cell", "")) == cell]
+        rows += [f"#ps{i}" for i, _ in syms]
         self.hl_cells, self.hl_refs = {cell}, set(refs)
         parts = [(f"Клетка {name}\n", "h")]
         for r in sorted(refs, key=_natural):
             parts += self._comp_text(r)
+        for _, s in syms:
+            parts.append((f"  {s.get('net', '')} — {'земля' if s.get('type') == 'GND' else 'питание'} (знак)\n", None))
         notes = [n["text"] for n in self.notes if n.get("cell", "").upper() == name]
         parts += [(f"  ? {t}\n", None) for t in notes]
-        if not refs and not notes:
+        if not refs and not notes and not syms:
             parts.append(("  компонентов не отмечено\n", None))
+        # выделить найденное и в списке «Компоненты» (без перерисовки подробностей — они уже про клетку)
+        rows = [r for r in rows if self.tv_comp.exists(r)]
+        if rows:
+            self._canvas_pick = True
+            self.tv_comp.selection_set(rows)
+            self.tv_comp.see(rows[0])
         self._set_detail(parts)
         self.redraw()
 
