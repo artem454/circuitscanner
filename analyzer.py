@@ -257,6 +257,17 @@ def two_lead_resistors(symbols, pins, W, H):
             sy["kind"] = "C"
 
 
+def only_small_marks(inner, sw, P):
+    """Внутри корпуса только мелкие отдельные значки — номера выводов, буквы, не узнанные как текст
+    (у микросхемы «3», «4», «5» у ножек изнутри). Линия или символ внутри — не корпус."""
+    if not P.get("rect_marks", 1):
+        return False
+    n, _, st, _ = cv2.connectedComponentsWithStats(inner, connectivity=8)
+    lim = P.get("rect_mark", 4) * sw
+    return n > 1 and all(max(st[i][2], st[i][3]) <= lim for i in range(1, n)) \
+        and inner.mean() / 255 <= P.get("rect_marks_fill", 0.08)
+
+
 def hatched_bodies(ink, bits, holes, sw, W, H, P):
     """Заштрихованный или залитый корпус: штрихи режут «дырку» корпуса на мелкие или (после размытия
     скана) заливают её целиком. Заливаем мелкие замкнутые дырки, стираем всё тонкое (провода, выводы,
@@ -313,7 +324,7 @@ def find_rects(ink, sw, W, H, P):
             continue
         # внутри корпуса пусто (надписи уже убраны)
         inner = ink[y + 2 * sw:y + h - 2 * sw, x + 2 * sw:x + w - 2 * sw]
-        if inner.size and inner.mean() / 255 > P["rect_fill"]:
+        if inner.size and inner.mean() / 255 > P["rect_fill"] and not only_small_marks(inner, sw, P):
             continue
         holes.append([x - sw, y - sw, x + w + sw, y + h + sw])
     if P.get("hatched", 1):
@@ -493,6 +504,35 @@ def clip_segments(segs, boxes, keep_len, edge=0):
                     nxt.append(p)
             pieces = nxt
         out.extend(p for p in pieces if max(p[2] - p[0], p[3] - p[1]) >= keep_len)
+    return out
+
+
+def capacitor_plates(wires, used, hit, strokes, sw, min_len, P):
+    """Обкладки конденсатора, слишком длинные для «штриха»: два параллельных отрезка похожей длины
+    друг напротив друга, близко, концы свободны, и в середину каждого упёрся провод. Иначе обкладки
+    остаются проводами, провод к ним просто примыкает — и конденсатор со своими выводами пропадает."""
+    cand = [i for i, sg in enumerate(wires) if i not in strokes and i in hit
+            and (i, 0) not in used and (i, 1) not in used
+            and max(sg[2] - sg[0], sg[3] - sg[1]) <= P.get("cap_len", 30) * sw]
+    out = set()
+    for a in cand:
+        for b in cand:
+            if b <= a:
+                continue
+            A, B = wires[a], wires[b]
+            ha, hb = A[1] == A[3], B[1] == B[3]
+            if ha != hb:
+                continue
+            ax0, ax1, ay = (A[0], A[2], A[1]) if ha else (A[1], A[3], A[0])
+            bx0, bx1, by = (B[0], B[2], B[1]) if hb else (B[1], B[3], B[0])
+            la, lb = ax1 - ax0, bx1 - bx0
+            if max(la, lb) > 1.4 * min(la, lb):
+                continue                                 # разной длины — не пара обкладок
+            if min(ax1, bx1) - max(ax0, bx0) < 0.7 * max(la, lb):
+                continue                                 # не друг напротив друга
+            if not sw <= abs(ay - by) <= P.get("cap_gap", 0.6) * max(la, lb):
+                continue                                 # слишком далеко (или это одна линия)
+            out.update((a, b))
     return out
 
 
@@ -802,6 +842,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     stroke_ids = {i for i, sg in enumerate(wires)
                   if (i, 0) not in used0 and (i, 1) not in used0 and i in hit0
                   and max(sg[2] - sg[0], sg[3] - sg[1]) < P["stroke_len"] * min_len}
+    if P.get("cap_pairs", 1):
+        stroke_ids |= capacitor_plates(wires, used0, hit0, stroke_ids, sw, min_len, P)
     strokes = [wires[i] for i in stroke_ids]
     wires = [sg for i, sg in enumerate(wires) if i not in stroke_ids]
 
@@ -930,6 +972,16 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
             del roots[r]
     kept = {i for gr in roots.values() for i in gr}
     ports = [p for p in ports if p["seg"] in kept]
+    if P.get("term_ports", 1):
+        # конец провода с подписью (IN, OUT+, +12V) — вход/выход схемы: на плате это разъём или клемма,
+        # деталь с одним выводом. term_ports=2 — и свободные концы без подписи
+        for p in ports:
+            if p["text"] is None and P.get("term_ports", 1) < 2:
+                continue
+            r = 1.5 * sw
+            symbols.append({"box": [int(p["x"] - r), int(p["y"] - r), int(p["x"] + r), int(p["y"] + r)],
+                            "kind": "TERM", "port": True})
+            pins.append({"seg": p["seg"], "x": p["x"], "y": p["y"], "symbol": len(symbols) - 1})
     order = sorted(roots.values(),
                    key=lambda gr: -sum(abs(segs[i][2] - segs[i][0]) + abs(segs[i][3] - segs[i][1]) for i in gr))
     seg_net, nets = {}, []
@@ -977,7 +1029,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         res["symbols"].append(dict({"id": sy["id"], "kind": sy["kind"], "box": [sc(v) for v in sy["box"]],
                                     "near_text": [f"T{k + 1}" for k in sy["near_text"]]},
                                    **({"rule": True} if sy.get("rule") else {}),     # знак земли найден правилом
-                                   **({"rect": True} if "cells" in sy else {})))     # корпус-прямоугольник
+                                   **({"rect": True} if "cells" in sy else {}),      # корпус-прямоугольник
+                                   **({"port": True} if sy.get("port") else {})))    # вход/выход схемы
     for net in nets:
         res["nets"].append({
             "id": net["id"], "segments": net["segments"],
@@ -1016,7 +1069,7 @@ def classify(res, model=None):
                     and second is not None and second.predict(c, dims, trusted_only=False)[0] == lab):
                 sy["kind"], sy["kind_conf"] = lab, float(conf)
             continue
-        if sy["kind"] in ("R", "U", "GND"):
+        if sy["kind"] in ("R", "U", "GND") or sy.get("port"):
             continue                                     # вытянутый корпус — резистор: на настоящих листах почти всегда
         lab, conf = model.predict(f)
         if lab != "OTHER":
