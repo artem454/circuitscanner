@@ -1393,6 +1393,11 @@ def classify(res, model=None):
         if sy["kind"] in ("R", "U", "GND") or sy.get("port") or sy.get("rule"):
             continue                                     # вытянутый корпус — резистор: на настоящих листах почти всегда
         lab, conf = model.predict(f)
+        if lab == "GND" and RECT_CONF.get("no_clf_gnd", 1) and second is not None:
+            # «земля» от классификатора почти всегда ошибка (настоящие земли находит правило по пикселям,
+            # а эта убирает деталь из списка) — берём ответ модели формы
+            lab2 = second.predict(c, dims, trusted_only=False)[0]
+            lab = lab2 if lab2 not in ("GND", "OTHER") else "OTHER"
         if lab != "OTHER":
             sy["kind"], sy["kind_conf"] = lab, float(conf)
             if second is not None and second.predict(c, dims, trusted_only=False)[0] != lab:
