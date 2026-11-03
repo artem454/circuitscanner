@@ -1,0 +1,134 @@
+--- synth.py	2026-11-03 22:32:10.426223500 +0700
++++ C:\Users\Artem\AppData\Local\Temp/conn_try/synth.py	2026-11-03 22:32:10.226247100 +0700
+@@ -56,6 +56,7 @@
+           "L": ["10μ", "100μ", "1m", "47μ", "2.2m"]}
+ 
+ 
++CONN_PROB = 0.6             # доля «меток цепи», нарисованных разъёмами разных видов
+ VARIETY = True              # транзисторы в поворотах, без кружка, PNP; диоды в обе стороны
+ HATCH_PROB = 0.15           # доля листов с заштрихованными резисторами
+ 
+@@ -608,16 +609,88 @@
+ 
+ 
+ def port(sh, cx, cy, rng):
+-    cv2.circle(sh.img, (cx, cy), 6, INK, sh.t, cv2.LINE_AA)
+     side = rng.choice([-1, 1])
++    lab = rng.choice(["IN", "OUT", "+5V", "+12V", "VCC", "X1", "A", "B", "CLK", "EN"])
++    v = getattr(sh, "vrng", None)
++    sh._last_conn = bool(v) and v.random() < CONN_PROB
++    if sh._last_conn:
++        return connector(sh, cx, cy, side, v)
++    cv2.circle(sh.img, (cx, cy), 6, INK, sh.t, cv2.LINE_AA)
+     out = (cx + side * 26, cy)
+     sh.line((cx + side * 6, cy), out)
+-    lab = rng.choice(["IN", "OUT", "+5V", "+12V", "VCC", "X1", "A", "B", "CLK", "EN"])
+     tw, th = sh.text_size(lab)
+     sh.text(lab, cx - tw - 12 if side > 0 else cx + 12, cy + th // 2)
+     return [cx - 8, cy - 8, cx + 8, cy + 8], [{"name": "1", "x": out[0], "y": out[1], "bx": cx + side * 6, "by": cy}]
+ 
+ 
++CONN_SHAPES = ["chev", "plug", "ring", "ringbig", "oslash", "dot", "tri", "socket", "tbar"]
++
++
++def connector(sh, cx, cy, side, v):
++    """Разъём/клемма (на плате — деталь J) разных видов, как рисуют в книгах и на сайтах: стрелка «<»,
++    наконечник «→», кружок малый/большой, «Ø», залитая точка, треугольник, гнездо «)», черта «⊤» с подписью.
++    Провод подходит с одной стороны (side), вид и поворот — из генератора v."""
++    shape = v.choice(CONN_SHAPES)
++    vertical = v.random() < 0.3
++    c = (cx, cy)
++    L = lambda p: rot(p, c, vertical)
++    t = sh.t
++    s = side
++    if shape == "chev":                                  # «<»: вершина у провода, штрихи от него
++        a = 10 + v.randint(0, 6)
++        attach = (cx, cy)
++        sh.line(L(attach), L((cx - s * a, cy - a)))
++        sh.line(L(attach), L((cx - s * a, cy + a)))
++        body = [(cx - s * a, cy - a), (cx, cy + a)]
++    elif shape == "plug":                                # наконечник: залитая стрелка, остриё от провода
++        a = 9 + v.randint(0, 5)
++        tip = np.array([L((cx - s * a, cy)), L((cx, cy - a * 0.6)), L((cx, cy + a * 0.6))], np.int32)
++        cv2.fillPoly(sh.img, [tip], INK, cv2.LINE_AA)
++        attach = (cx, cy)
++        body = [(cx - s * a, cy - a * 0.6), (cx, cy + a * 0.6)]
++    elif shape in ("ring", "ringbig", "oslash", "dot"):
++        r = {"ring": 5 + v.randint(0, 2), "ringbig": 11 + v.randint(0, 5), "oslash": 8 + v.randint(0, 3),
++             "dot": 4 + v.randint(0, 2)}[shape]
++        cc = L((cx, cy))
++        cv2.circle(sh.img, (int(cc[0]), int(cc[1])), r, INK, -1 if shape == "dot" else t, cv2.LINE_AA)
++        if shape == "oslash":
++            sh.line(L((cx - r - 2, cy + r + 2)), L((cx + r + 2, cy - r - 2)))
++        attach = (cx + s * r, cy)
++        body = [(cx - r, cy - r), (cx + r, cy + r)]
++    elif shape == "tri":                                 # треугольник вершиной к проводу
++        a = 10 + v.randint(0, 5)
++        tri = np.array([L((cx, cy)), L((cx - s * 2 * a, cy - a)), L((cx - s * 2 * a, cy + a))], np.int32)
++        cv2.polylines(sh.img, [tri], True, INK, t + 1, cv2.LINE_AA)
++        attach = (cx, cy)
++        body = [(cx - s * 2 * a, cy - a), (cx, cy + a)]
++    elif shape == "socket":                              # гнездо «)»: дуга открыта от провода
++        r = 9 + v.randint(0, 4)
++        cc = L((cx - s * r, cy))
++        a0 = (-60 if s > 0 else 120) + (90 if vertical else 0)
++        cv2.ellipse(sh.img, (int(cc[0]), int(cc[1])), (r, r), 0, a0, a0 + 120, INK, t, cv2.LINE_AA)
++        attach = (cx, cy)
++        body = [(cx - s * r, cy - r), (cx, cy + r)]
++    else:                                                # «⊤»: черта поперёк провода, подпись за ней
++        a = 9 + v.randint(0, 5)
++        sh.line(L((cx, cy - a)), L((cx, cy + a)), t + 1)
++        attach = (cx, cy)
++        body = [(cx - 2, cy - a), (cx + 2, cy + a)]
++    out = (attach[0] + s * 26, attach[1])
++    sh.line(L(attach), L(out))
++    lab = v.choice(["XS1", "XS2", "X1", "X2", "XP1", "XT1", "J1", "IN", "OUT", "+12V", "A", "B", "~220"])
++    tw, th = sh.text_size(lab)
++    bb = [L(q) for q in body]
++    x0, x1 = min(q[0] for q in bb), max(q[0] for q in bb)
++    y0, y1 = min(q[1] for q in bb), max(q[1] for q in bb)
++    if shape == "tbar":                                  # подпись — за чертой
++        tx = x0 - tw - 4 if (s > 0) != vertical else x1 + 4
++        sh.text(lab, tx if not vertical else x0 - tw / 2, (y0 + y1) / 2 + th / 2 if not vertical else (y0 - 4 if s > 0 else y1 + th + 4))
++    else:
++        sh.text(lab, x0, y0 - 5)
++    o, at = L(out), L(attach)
++    return [x0 - 2, y0 - 2, x1 + 2, y1 + 2], [{"name": "1", "x": o[0], "y": o[1], "bx": at[0], "by": at[1]}]
++
++
+ # ---------- провода ----------
+ 
+ def seg_hits_box(a, b, box, pad=4):
+@@ -797,7 +870,12 @@
+                    "N": "ENC", "V": "TACHO", "H": "HALL", "O": "MOTOR", "Z": "LOGIC"}.get(k, k)
+             if k in "WYF":
+                 typ = CTRL_TYPES[kd]
++            if k == "P" and getattr(sh, "_last_conn", False):
++                typ = "TERM"                              # разъём/клемма — деталь платы
++            cls = "PORT" if k == "P" else None            # для классификатора: класс, который есть и на листах
+             comp = {"id": f"X{cid}", "type": typ, "box": [float(v) for v in box], "pins": pins, "kind": k}
++            if cls:
++                comp["cls"] = cls
+             if k == "Z":
+                 comp["chip"] = f"DD{chip_no}"             # секции одного корпуса
+             sh.comps.append(comp)
+@@ -915,7 +993,7 @@
+     for c in sh.comps:
+         b = c["box"]
+         tc = np.array([_pt(M, x, y) for x, y in ((b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3]))])
+-        truth["comps"].append({"id": c["id"], "type": c["type"], "ref": c.get("ref"), "value": c.get("value"),
++        truth["comps"].append({"id": c["id"], "type": c["type"], "cls": c.get("cls"), "ref": c.get("ref"), "value": c.get("value"),
+                                "chip": c.get("chip"),
+                                "box": [float(tc[:, 0].min()), float(tc[:, 1].min()),
+                                        float(tc[:, 0].max()), float(tc[:, 1].max())]})
+--- learn.py	2026-11-03 22:32:10.386387300 +0700
++++ C:\Users\Artem\AppData\Local\Temp/conn_try/learn.py	2026-11-03 22:32:10.248903300 +0700
+@@ -473,7 +473,7 @@
+             if cb[0] - 4 <= cx <= cb[2] + 4 and cb[1] - 4 <= cy <= cb[3] + 4:
+                 d = abs(cx - (cb[0] + cb[2]) / 2) + abs(cy - (cb[1] + cb[3]) / 2)
+                 if d < best:
+-                    best, lab = d, c["type"]
++                    best, lab = d, c.get("cls") or c["type"]     # разъём синтетики учится как «метка цепи»
+         X.append(f)
+         y.append(lab)
+         Cr.append(cr)
