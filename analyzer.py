@@ -851,6 +851,43 @@ def _bar_at(c, R, sw, P, wire_len):
     return t, bt, left, right, L
 
 
+def grow_terminals(symbols, pins, words, sw):
+    """Рамка клеммы — вместе с её подписью (A, +12V, IN) и прилегающим рисунком без выводов (кружок «Ø»,
+    гнездо): так клемма — одна деталь на месте, где её видит человек. После привязки выводов."""
+    has_pin = {p["symbol"] for p in pins}
+
+    def gap(a, b):
+        return max(a[0] - b[2], b[0] - a[2], a[1] - b[3], b[1] - a[3], 0)
+    k = 0
+    while k < len(symbols):
+        sy = symbols[k]
+        if sy["kind"] != "TERM":
+            k += 1
+            continue
+        j = 0
+        while j < len(symbols):
+            o = symbols[j]
+            if j != k and j not in has_pin and "cells" not in o and not o.get("port") and gap(sy["box"], o["box"]) <= 2 * sw:
+                b, ob = sy["box"], o["box"]
+                sy["box"] = [min(b[0], ob[0]), min(b[1], ob[1]), max(b[2], ob[2]), max(b[3], ob[3])]
+                del symbols[j]
+                for p in pins:
+                    if p["symbol"] > j:
+                        p["symbol"] -= 1
+                has_pin = {p["symbol"] for p in pins}
+                if j < k:
+                    k -= 1
+                continue
+            j += 1
+        near = [(gap(sy["box"], wd["box"]), wd["box"]) for wd in words]
+        near = [x for x in near if x[0] <= 6 * sw]
+        if near:
+            wb = min(near)[1]
+            b = sy["box"]
+            sy["box"] = [min(b[0], wb[0]), min(b[1], wb[1]), max(b[2], wb[2]), max(b[3], wb[3])]
+        k += 1
+
+
 def _chevron_at(c, R, sw, P, wire_len):
     """Разъём-стрелка «<» или вилка «>»: провод входит сверху и кончается в вершине, от которой вниз
     симметрично расходятся два наклонных штриха; над вершиной (по бокам от провода) пусто."""
@@ -1309,6 +1346,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
                     continue
                 j += 1
             k += 1
+    if P.get("term_grow", 1):
+        grow_terminals(symbols, pins, words, sw)
     two_lead_resistors(symbols, pins, W, H)
     if P.get("triac", 1):
         for sy in symbols:
