@@ -909,7 +909,7 @@ def _chevron_at(c, R, sw, P, wire_len):
             if lo < 0 < hi and 0.3 * d <= -lo <= 2.5 * d and 0.3 * d <= hi <= 2.5 * d                     and abs(hi + lo) <= max(2 * sw, 0.3 * (hi - lo)):
                 rows_ok += 1
         arm = d
-    if arm < 4 * sw or rows_all == 0 or rows_ok < 0.7 * rows_all:
+    if arm < P.get("term_arm", 4) * sw or rows_all == 0 or rows_ok < 0.7 * rows_all:
         return False
     if wire_len < P.get("term_wire", 1.0) * arm:
         return False
