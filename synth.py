@@ -56,6 +56,7 @@ VALUES = {"R": ["10", "22", "100", "270", "470", "1k", "2.2k", "4.7k", "10k", "4
           "L": ["10μ", "100μ", "1m", "47μ", "2.2m"]}
 
 
+VARIETY = True              # транзисторы в поворотах, без кружка, PNP; диоды в обе стороны
 HATCH_PROB = 0.15           # доля листов с заштрихованными резисторами
 
 
@@ -99,6 +100,8 @@ def two_pin(sh, kind, cx, cy, vertical, cid):
         outs = [(cx - gap / 2 - lead, cy), (cx + gap / 2 + lead, cy)]
     elif kind == "D":
         w, h, lead = 20, 22, 26
+        if getattr(sh, "vrng", None) and sh.vrng.random() < 0.5:
+            L = lambda p: rot((2 * cx - p[0], p[1]), c, vertical)   # диод в другую сторону
         tri = np.array([L((cx - w / 2, cy - h / 2)), L((cx - w / 2, cy + h / 2)), L((cx + w / 2, cy))], np.int32)
         cv2.polylines(sh.img, [tri], True, INK, t, cv2.LINE_AA)
         sh.line(L((cx + w / 2, cy - h / 2)), L((cx + w / 2, cy + h / 2)), t + 1)
@@ -141,26 +144,49 @@ def hatch(sh, x0, y0, x1, y1):
 
 
 def transistor(sh, cx, cy, mirror):
+    """Биполярный транзистор. Разнообразие (поворот, без кружка, PNP) — из своего генератора sh.vrng,
+    чтобы остальной лист не менялся; без него — прежний вид."""
+    v = getattr(sh, "vrng", None)
+    rotk = v.choice([0, 0, 1, 2, 3]) if v else 0              # поворот на 90°·k
+    circle = v.random() < 0.7 if v else True
+    pnp = v.random() < 0.3 if v else False
     r = 24
-    cv2.circle(sh.img, (cx, cy), r, INK, sh.t, cv2.LINE_AA)
     s = -1 if mirror else 1
+
+    def T(p):
+        dx, dy = p[0] - cx, p[1] - cy
+        for _ in range(rotk):
+            dx, dy = -dy, dx
+        return (cx + dx, cy + dy)
+
+    def line(a, b, t=None):
+        sh.line(T(a), T(b), t)
+    if circle:
+        cv2.circle(sh.img, (cx, cy), r, INK, sh.t, cv2.LINE_AA)
     bx = cx - s * 8
-    sh.line((bx, cy - 13), (bx, cy + 13), sh.t + 1)
+    line((bx, cy - 13), (bx, cy + 13), sh.t + 1)
     pins = []
     b_out = (cx - s * (r + 22), cy)
-    sh.line((bx, cy), b_out)
-    pins.append({"name": "B", "x": b_out[0], "y": b_out[1], "bx": cx - s * r, "by": cy})
+    line((bx, cy), b_out)
+    pins.append(("B", b_out, (cx - s * r, cy)))
     cxp = (cx + s * 10, cy - r - 22)
-    sh.line((bx, cy - 6), (cx + s * 10, cy - 16))
-    sh.line((cx + s * 10, cy - 16), cxp)
-    pins.append({"name": "C", "x": cxp[0], "y": cxp[1], "bx": cx + s * 10, "by": cy - r + 2})
+    line((bx, cy - 6), (cx + s * 10, cy - 16))
+    line((cx + s * 10, cy - 16), cxp)
+    pins.append(("C", cxp, (cx + s * 10, cy - r + 2)))
     ep = (cx + s * 10, cy + r + 22)
-    sh.line((bx, cy + 6), (cx + s * 10, cy + 16))
-    tip = np.array([(cx + s * 10, cy + 16), (cx + s * 2, cy + 15), (cx + s * 7, cy + 8)], np.int32)
-    cv2.fillPoly(sh.img, [tip], INK, cv2.LINE_AA)
-    sh.line((cx + s * 10, cy + 16), ep)
-    pins.append({"name": "E", "x": ep[0], "y": ep[1], "bx": cx + s * 10, "by": cy + r - 2})
-    return [cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2], pins
+    line((bx, cy + 6), (cx + s * 10, cy + 16))
+    if pnp:                                                 # стрелка эмиттера к базе
+        tip = [(bx + s * 1, cy + 7), (bx + s * 9, cy + 9), (bx + s * 5, cy + 14)]
+    else:
+        tip = [(cx + s * 10, cy + 16), (cx + s * 2, cy + 15), (cx + s * 7, cy + 8)]
+    cv2.fillPoly(sh.img, [np.array([T(q) for q in tip], np.int32)], INK, cv2.LINE_AA)
+    line((cx + s * 10, cy + 16), ep)
+    pins.append(("E", ep, (cx + s * 10, cy + r - 2)))
+    out = []
+    for name, o, bb in pins:
+        o, bb = T(o), T(bb)
+        out.append({"name": name, "x": o[0], "y": o[1], "bx": bb[0], "by": bb[1]})
+    return [cx - r - 2, cy - r - 2, cx + r + 2, cy + r + 2], out
 
 
 def chip(sh, cx, cy, n):
@@ -689,6 +715,7 @@ def generate(seed, hard=None, level=None):
     lv = LEVELS[level]
     sh = Sheet(rng, *lv["size"])
     # заштрихованные корпуса резисторов — из своего генератора, остальной лист не меняется
+    sh.vrng = random.Random(seed * 17 + 5) if VARIETY else None   # разнообразие транзисторов и диодов
     hr = random.Random(seed * 13 + 11)
     if hr.random() < HATCH_PROB:
         sh.hatch, sh.hatch_dir = hr.choice([3, 4, 5]) * sh.t, hr.choice([1, -1])
