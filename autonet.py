@@ -43,6 +43,9 @@ COMPAT = {("Q", "M"), ("M", "Q"), ("D", "Z"), ("Z", "D"), ("D", "LED"), ("LED", 
 NOT_PARTS = {"GND", "PORT"}
 GENERIC = {"U", "X", None}         # «прямоугольник» и неопознанное — тип берём из буквы обозначения
 # что рисуют прямоугольником с двумя выводами: у такого корпуса верим букве обозначения, а не форме
+REF_MARGIN = 0.5                   # «однозначно ближе»: в размерах символа
+REF_WINS = False                   # тип по букве, если форма спорит. Выключено: учебные +4, тест −4 (подпись
+                                   # ненайденного резистора достаётся соседнему конденсатору)
 RECT_BODY = {"R", "RT", "F", "K", "L", "TC", "SENSOR", "HALL", "ENC", "TACHO", "QF", "J", "TERM"}
 
 
@@ -160,7 +163,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
         return max(b[2] - b[0], b[3] - b[1], 6 * stroke)
 
     # --- обозначения: жадно по расстоянию с учётом совместимости ---
-    pairs = []
+    pairs, geo, sure_ref = [], {}, set()
     for t in texts:
         if not t["ref"]:
             continue
@@ -175,12 +178,21 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             if st and pt and st != pt and (st, pt) not in COMPAT and st not in GENERIC:
                 cost += 1.5                                  # тип не сходится — можно, но хуже
             pairs.append((cost, t["id"], sid))
+            geo.setdefault(t["id"], []).append((d / size(s["box"]), sid))
     used_t, ref_of = set(), {}
     for cost, tid, sid in sorted(pairs):
         if tid in used_t or sid in ref_of:
             continue
         used_t.add(tid)
         ref_of[sid] = next(t for t in texts if t["id"] == tid)["ref"]
+        # подпись однозначно этой детали: она ближайшая и заметно ближе следующей по близости
+        g = sorted(geo[tid])
+        if g[0][1] == sid and (len(g) == 1 or g[1][0] - g[0][0] >= REF_MARGIN):
+            sure_ref.add(sid)
+    seen_refs = {}
+    for t in texts:
+        if t["ref"]:
+            seen_refs[t["ref"]] = seen_refs.get(t["ref"], 0) + 1
     # --- номиналы ---
     vpairs = []
     for t in texts:
@@ -276,6 +288,9 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             typ, low = "R", True                             # вытянутый корпус с двумя выводами — не микросхема
         elif st and pt and st != pt and (st, pt) not in COMPAT:
             low = True
+            if (REF_WINS and sid in sure_ref and seen_refs.get(ref, 0) == 1
+                    and re.fullmatch(r"[A-Z]+\d+(\.\d+)?", ref)):
+                typ = pt                                     # буква обозначения надёжнее классификатора формы
         elif s.get("uncertain") and not pt:
             low = True                                       # две модели разошлись, подписи нет
         if sid in unsure:
