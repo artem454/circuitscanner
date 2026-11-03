@@ -867,6 +867,14 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         H, W = gray.shape
         ink = binarize(gray)
         sw = stroke_width(ink)
+    if P.get("faint_px", 1):
+        # бледные пиксели (рамки-подсветки, сетка): даже самая тёмная точка рядом светлая
+        k = int(2 * sw + 1) | 1
+        gmin = cv2.erode(gray, np.ones((k, k), np.uint8))
+        if (ink > 0).any():
+            dark = 255 - float(np.median(gmin[ink > 0]))
+            if dark >= 60:
+                ink[(255 - gmin.astype(np.float32)) < P.get("faint_px_k", 0.55) * dark] = 0
     tol = P["tol"] * sw + 2
     # на толстом чертеже (линия ~1 % листа) пороги «в толщинах линии» становятся слишком большими:
     # короткие выводы между деталями не считаются проводами, а мелкие точки — точками. Ограничиваем
@@ -1160,7 +1168,7 @@ def classify(res, model=None):
                     and second is not None and second.predict(c, dims, trusted_only=False)[0] == lab):
                 sy["kind"], sy["kind_conf"] = lab, float(conf)
             continue
-        if sy["kind"] in ("R", "U", "GND") or sy.get("port"):
+        if sy["kind"] in ("R", "U", "GND") or sy.get("port") or sy.get("rule"):
             continue                                     # вытянутый корпус — резистор: на настоящих листах почти всегда
         lab, conf = model.predict(f)
         if lab != "OTHER":

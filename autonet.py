@@ -43,6 +43,7 @@ COMPAT = {("Q", "M"), ("M", "Q"), ("D", "Z"), ("Z", "D"), ("D", "LED"), ("LED", 
 NOT_PARTS = {"GND", "PORT"}
 GENERIC = {"U", "X", None}         # «прямоугольник» и неопознанное — тип берём из буквы обозначения
 # что рисуют прямоугольником с двумя выводами: у такого корпуса верим букве обозначения, а не форме
+REF_WINS_UNSURE = True             # …но если сами модели формы разошлись — букве верим
 REF_MARGIN = 0.5                   # «однозначно ближе»: в размерах символа
 REF_WINS = False                   # тип по букве, если форма спорит. Выключено: учебные +4, тест −4 (подпись
                                    # ненайденного резистора достаётся соседнему конденсатору)
@@ -288,7 +289,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             typ, low = "R", True                             # вытянутый корпус с двумя выводами — не микросхема
         elif st and pt and st != pt and (st, pt) not in COMPAT:
             low = True
-            if (REF_WINS and sid in sure_ref and seen_refs.get(ref, 0) == 1
+            if ((REF_WINS or (REF_WINS_UNSURE and s.get("uncertain"))) and sid in sure_ref and seen_refs.get(ref, 0) == 1
                     and re.fullmatch(r"[A-Z]+\d+(\.\d+)?", ref)):
                 typ = pt                                     # буква обозначения надёжнее классификатора формы
         elif s.get("uncertain") and not pt:
