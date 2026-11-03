@@ -976,7 +976,8 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
     for sy in symbols:
         res["symbols"].append(dict({"id": sy["id"], "kind": sy["kind"], "box": [sc(v) for v in sy["box"]],
                                     "near_text": [f"T{k + 1}" for k in sy["near_text"]]},
-                                   **({"rule": True} if sy.get("rule") else {})))   # знак земли найден правилом
+                                   **({"rule": True} if sy.get("rule") else {}),     # знак земли найден правилом
+                                   **({"rect": True} if "cells" in sy else {})))     # корпус-прямоугольник
     for net in nets:
         res["nets"].append({
             "id": net["id"], "segments": net["segments"],

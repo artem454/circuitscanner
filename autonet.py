@@ -42,6 +42,8 @@ COMPAT = {("Q", "M"), ("M", "Q"), ("D", "Z"), ("Z", "D"), ("D", "LED"), ("LED", 
           ("TERM", "J"), ("Q", "IGBT"), ("K", "SW")}
 NOT_PARTS = {"GND", "PORT"}
 GENERIC = {"U", "X", None}         # «прямоугольник» и неопознанное — тип берём из буквы обозначения
+# что рисуют прямоугольником с двумя выводами: у такого корпуса верим букве обозначения, а не форме
+RECT_BODY = {"R", "RT", "F", "K", "L", "TC", "SENSOR", "HALL", "ENC", "TACHO", "QF", "J", "TERM"}
 
 
 def bare_number(v):
@@ -266,6 +268,12 @@ def build(res, title="Автоматический разбор (без ИИ)", 
         low = False
         if pt and (st in GENERIC or not st):
             typ = pt
+        elif s.get("rect") and pt in RECT_BODY and re.fullmatch(r"[A-Z]+\d+(\.\d+)?", ref):
+            typ = pt                                         # прямоугольник — не только резистор: FU1, K1, RK2
+        b = s["box"]
+        if (s.get("rect") and typ == "U" and not pt and len(pins) == 2
+                and max(b[2] - b[0], b[3] - b[1]) >= 2 * min(b[2] - b[0], b[3] - b[1])):
+            typ, low = "R", True                             # вытянутый корпус с двумя выводами — не микросхема
         elif st and pt and st != pt and (st, pt) not in COMPAT:
             low = True
         elif s.get("uncertain") and not pt:
