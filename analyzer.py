@@ -993,6 +993,10 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
 _MODEL = {}
 
 
+RECT_KINDS = {"R", "U", "COIL", "FU", "RT", "HALL", "ENC", "TACHO", "SENSOR", "TC", "MCU", "TERM", "QF"}
+RECT_CONF = {}             # настройки уточнения прямоугольников (on, trusted, conf) — для опытов
+
+
 def classify(res, model=None):
     """Подписать типы символов обученным классификатором (если он есть)."""
     import symclass
@@ -1004,8 +1008,16 @@ def classify(res, model=None):
     if not model.ready():
         return False
     for sy, f, (c, dims) in zip(res["symbols"], res["_features"], res["_crops"]):
-        if sy["kind"] in ("R", "U", "GND"):
+        if sy.get("rect") and RECT_CONF.get("on", 1) and (sy["kind"] == "U" or not RECT_CONF.get("only_u", 1)):
+            # корпус-прямоугольник: форма «прямоугольник» общая у резистора, реле, предохранителя,
+            # микросхемы — уточняем, только если обе модели согласны на один из таких классов
+            lab, conf = model.predict(f, trusted_only=RECT_CONF.get("trusted", 0))
+            if (lab in RECT_KINDS and lab != sy["kind"] and conf >= RECT_CONF.get("conf", 0.6)
+                    and second is not None and second.predict(c, dims, trusted_only=False)[0] == lab):
+                sy["kind"], sy["kind_conf"] = lab, float(conf)
             continue
+        if sy["kind"] in ("R", "U", "GND"):
+            continue                                     # вытянутый корпус — резистор: на настоящих листах почти всегда
         lab, conf = model.predict(f)
         if lab != "OTHER":
             sy["kind"], sy["kind_conf"] = lab, float(conf)

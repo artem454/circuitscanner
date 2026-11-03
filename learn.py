@@ -634,8 +634,9 @@ def _examples_by_box(parts, res, power_symbols=()):
     sw = res.get("stroke", 2)
     X, y, Cr = [], [], []
     for sy, f, cr in zip(res["symbols"], res["_features"], res["_crops"]):
-        if sy["kind"] in ("R", "U", "GND", "PORT") and not sy.get("rule"):
-            continue                                     # знак земли по правилу — верный пример, берём
+        if (sy["kind"] in ("R", "U", "GND", "PORT") and not sy.get("rule")) or sy.get("rect"):
+            continue                                     # знак земли по правилу — верный пример, берём;
+                                                         # корпус-прямоугольник — нет, какой бы тип ему ни дали
         x0, y0, x1, y1 = sy["box"]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         hit, near = [], False
@@ -671,7 +672,7 @@ def real_examples(project, res=None):
             comps.setdefault(xy, []).append(cls)
     cand = []
     for sy, f, cr in zip(res["symbols"], res["_features"], res["_crops"]):
-        if (sy["kind"] in ("R", "U") or sy.get("kind") in ("GND", "PORT")) and not sy.get("rule"):
+        if ((sy["kind"] in ("R", "U") or sy.get("kind") in ("GND", "PORT")) and not sy.get("rule")) or sy.get("rect"):
             continue
         x0, y0, x1, y1 = sy["box"]
         span = {(int(x // cell), int(y // cell)) for x in (x0, x1) for y in (y0, y1)}
