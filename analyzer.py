@@ -569,18 +569,27 @@ def _ground_at(c, full, R, sw, P, wire_len):
 
     wide = max(3 * sw, 6)
     lo, hi = int(R - 2 * sw - 1), int(R + 3 * sw + 1)
-    rows = [r for r in range(lo, hi + 1) if run(r)[0] >= wide]
-    if not rows or rows[-1] - rows[0] + 1 != len(rows) or len(rows) > 3 * sw + 1:
-        return False                                     # нет черты или она толстая/рваная
+    # первая черта у конца провода; следующие черты «лесенки» проверяются ниже, как черты под ней
+    r0 = next((r for r in range(lo, hi + 1) if run(r)[0] >= wide), None)
+    if r0 is None:
+        return False                                     # нет черты
+    rows = [r0]
+    while rows[-1] + 1 < len(c) and run(rows[-1] + 1)[0] >= wide:
+        rows.append(rows[-1] + 1)
+    if len(rows) > 3 * sw + 1:
+        return False                                     # толстая полоса, а не черта
     t, bt = rows[0], rows[-1]
     left = min(run(r)[1] for r in rows)
     right = max(run(r)[2] for r in rows)
     L = right - left + 1
     if L < max(4 * sw, 10) or L > P.get("gnd_maxlen", 25) * sw:
         return False
+    # рваный нижний край черты на скане: строки, заполненные хотя бы наполовину, — ещё черта
+    while bt + 1 < len(c) and bt - t < 3 * sw and c[bt + 1, left:right + 1].sum() >= 0.5 * L:
+        bt += 1
     if abs((left + right) / 2 - R) > 0.2 * L + 1:
         return False                                     # провод не в середину черты (угол провода)
-    if wire_len < P.get("gnd_wire", 0.5) * L:
+    if wire_len < P.get("gnd_wire", 0.25) * L:
         return False                                     # короткий штрих (плюс у электролита)
     m = max(1, int(round(sw)))
     # концы черты свободны
@@ -588,7 +597,7 @@ def _ground_at(c, full, R, sw, P, wire_len):
     if c[t - m:bt + m + 1, left - side:left].any() or c[t - m:bt + m + 1, right + 1:right + 1 + side].any():
         return False
     # над чертой пусто, кроме самого провода
-    up = c[max(0, t - int(0.5 * L)):t - m, left - m:right + m + 1].copy()
+    up = c[max(0, t - int(P.get("gnd_up", 0.3) * L)):t - m, left - m:right + m + 1].copy()
     wc = R - (left - m)
     up[:, max(0, wc - int(1.5 * sw) - 1):wc + int(1.5 * sw) + 2] = 0
     if up.sum() > 2 * sw * sw:
@@ -598,8 +607,9 @@ def _ground_at(c, full, R, sw, P, wire_len):
     near = int(P.get("gnd_near", 0.4) * L)
     down = np.vstack([full[bt + 1:bt + 1 + near, left - m:right + m + 1],
                       c[bt + 1 + near:bt + 1 + int(P.get("gnd_below", 0.8) * L), left - m:right + m + 1]])
-    prev, r, bands = L, 0, 0
-    inked = down.any(axis=1)
+    lines_only = c[bt + 1:bt + 1 + len(down), left - m:right + m + 1]
+    prev, r, bands, last = L, 0, 0, 0
+    inked = down.sum(axis=1) >= 1.5 * sw                 # отдельные крапинки шума — не черта
     while r < len(down):
         if not inked[r]:
             r += 1
@@ -608,13 +618,24 @@ def _ground_at(c, full, R, sw, P, wire_len):
         while r < len(down) and inked[r]:
             r += 1
         band = down[r0:r]
-        cols = np.nonzero(band.any(axis=0))[0]
+        cols = np.nonzero(band.sum(axis=0) >= max(1, min(0.3 * (r - r0), 0.5 * sw)))[0]   # без крапинок по краям
+        if not len(cols) or r - r0 < 0.5 * sw:
+            continue                                     # тонкая полоска — рваный край черты, не черта
         w = cols[-1] - cols[0] + 1
+        if band.sum() < 0.6 * w * (r - r0) and r0 - last >= sw and (bands or not lines_only[r0:r].any()):
+            return True                                  # ниже черт с отступом — подпись (GND), а не обкладка
         bands += 1
-        if (bands > 2 or r - r0 > 3 * sw + 1 or r == len(down) or w > 0.85 * prev
-                or abs((cols[0] + cols[-1]) / 2 - wc) > 0.2 * L + sw or band.sum() < 0.6 * w * (r - r0)):
-            return False
-        prev = w
+        if bands > 3:
+            return False                                 # больше четырёх черт
+        if r - r0 > 3 * sw + 1 or r == len(down):
+            return False                                 # не черта: толстое пятно или линия уходит дальше
+        if w > 0.85 * prev:
+            return False                                 # не короче предыдущей (конденсатор)
+        if abs((cols[0] + cols[-1]) / 2 - wc) > 0.2 * L + sw:
+            return False                                 # не по центру
+        if band.sum() < 0.6 * w * (r - r0):
+            return False                                 # не сплошная (буквы, штриховка)
+        prev, last = w, r
     return True
 
 
