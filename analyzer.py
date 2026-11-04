@@ -1056,8 +1056,10 @@ class SymbolModel:
 
 # ---------- главное ----------
 
-def analyze_gray(gray0, P=None, ocr=False, progress=None):
-    """Разбор серой картинки. Координаты результата — пиксели исходной картинки."""
+def analyze_gray(gray0, P=None, ocr=False, progress=None, enhanced=None):
+    """Разбор серой картинки. Координаты результата — пиксели исходной картинки.
+    enhanced — улучшенная копия gray0 в целое число раз крупнее: по ней ищем элементы и линии,
+    надписи читаются только по оригиналу."""
     P = P or load_params()
 
     def step(msg):
@@ -1066,19 +1068,27 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
 
     H0, W0 = gray0.shape
     s = int(max(1, min(4, round(P["target"] / max(H0, W0)))))
-    gray = cv2.resize(gray0, None, fx=s, fy=s, interpolation=cv2.INTER_CUBIC) if s > 1 else gray0.copy()
+
+    def at_scale(k):
+        plain = cv2.resize(gray0, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC) if k > 1 else gray0.copy()
+        if enhanced is None:
+            return plain, plain
+        how = cv2.INTER_AREA if enhanced.shape[1] > W0 * k else cv2.INTER_CUBIC
+        return cv2.resize(enhanced, (W0 * k, H0 * k), interpolation=how), plain
+
+    gray, gray_text = at_scale(s)
     H, W = gray.shape
     step("бинаризация")
     ink = binarize(gray)
-    sw = stroke_width(ink)
+    sw = stroke_width(binarize(gray_text))     # толщина — по оригиналу: улучшение оставляет крошки на контурах
     if P.get("thin_upscale", 1) and s == 1 and sw <= 1.2 and max(H0, W0) <= 1.6 * P["target"]:
         # линии в 1 px: короткие выводы между соседними деталями короче минимального
         # провода и теряются — разбираем в двойном масштабе
         s = 2
-        gray = cv2.resize(gray0, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        gray, gray_text = at_scale(2)
         H, W = gray.shape
         ink = binarize(gray)
-        sw = stroke_width(ink)
+        sw = stroke_width(binarize(gray_text))     # толщина — по оригиналу: улучшение оставляет крошки на контурах
     if P.get("faint_px", 1):
         # бледные пиксели (рамки-подсветки, сетка): даже самая тёмная точка рядом светлая
         k = int(2 * sw + 1) | 1
@@ -1359,7 +1369,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None):
         for sy in symbols:
             if sy["kind"] == "?" and is_zigzag(work, sy["box"], sw):
                 sy["kind"], sy["rule"] = "R", True       # американский резистор в любом повороте
-    texts_ok = try_ocr(gray, words) if ocr else False
+    texts_ok = try_ocr(gray_text, words) if ocr else False
     import symclass
     feats, crops = [], []
     for k, sy in enumerate(symbols):
@@ -1518,15 +1528,24 @@ def semiconductor_by_pins(res):
             sy["kind"], sy["semi_from"] = new, sy["kind"]
 
 
-def analyze(project, ocr=True, progress=None, params=None):
+def analyze(project, ocr=True, progress=None, params=None, enhance=""):
+    """enhance — ключ модели из enhance.MODELS; пусто — без улучшения картинки."""
     project = Path(project)
     manifest = core.load_json(project / "manifest.json")
     gray0 = core.imread(project / "clean.png")[:, :, 0]
-    res = analyze_gray(gray0, load_params(params), ocr, progress)
+    better = None
+    if enhance:
+        import enhance as enhance_mod
+        if progress:
+            progress("улучшение картинки")
+        better = enhance_mod.enhanced_gray(project, enhance)
+    res = analyze_gray(gray0, load_params(params), ocr, progress, enhanced=better)
+    res["enhance"] = enhance
     res["classified"] = classify(res)
     try:                                         # каждая схема — в пул поколений (символы не забываются)
         import generations
-        generations.add_from_analysis(project, res)
+        if not enhance:                          # пул учится на обычном разборе
+            generations.add_from_analysis(project, res)
     except Exception:
         pass
     cell = manifest["grid"]["cell"]

@@ -23,6 +23,7 @@ from PIL import Image, ImageTk
 import analyzer
 import core
 import diagnose
+import enhance
 
 HERE = Path(__file__).resolve().parent
 
@@ -87,6 +88,10 @@ class App(tk.Tk):
         ttk.Checkbutton(bar, text="Выпрямлять наклон", variable=self.var_deskew).pack(side="left", padx=6)
         ttk.Button(bar, text="Пересобрать фрагменты", command=self.rebuild).pack(side="left")
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Label(bar, text="Улучшение:").pack(side="left")
+        self.var_enhance = tk.StringVar(value=enhance.TITLES[""])
+        ttk.Combobox(bar, textvariable=self.var_enhance, values=list(enhance.TITLES.values()), width=13,
+                     state="readonly").pack(side="left")
         ttk.Button(bar, text="Анализ без ИИ", command=self.run_analysis).pack(side="left", padx=4)
         ttk.Button(bar, text="Netlist без ИИ", command=self.run_autonet).pack(side="left")
         ttk.Button(bar, text="Задание для Claude", command=self.copy_task).pack(side="left")
@@ -401,10 +406,11 @@ class App(tk.Tk):
         if not self.project:
             return
         self.status.set("Анализ без ИИ: провода, точки, символы, цепи…")
+        key = enhance.key_of(self.var_enhance.get())
 
         def work():
             try:
-                res = analyzer.analyze(self.project, ocr=True,
+                res = analyzer.analyze(self.project, ocr=True, enhance=key,
                                        progress=lambda m: self.after(0, self.status.set, f"Анализ: {m}…"))
                 self.after(0, self._analysis_done, res)
             except Exception as e:
@@ -426,11 +432,13 @@ class App(tk.Tk):
         if not self.project:
             return messagebox.showinfo("Нет проекта", "Сначала откройте картинку.")
         self.status.set("Netlist без ИИ: разбор и чтение надписей…")
+        key = enhance.key_of(self.var_enhance.get())
 
         def work():
             try:
                 import autonet
-                nl = autonet.run(self.project, progress=lambda m: self.after(0, self.status.set, f"Netlist без ИИ: {m}…"))
+                nl = autonet.run(self.project, enhance=key,
+                                 progress=lambda m: self.after(0, self.status.set, f"Netlist без ИИ: {m}…"))
                 self.after(0, self._autonet_done, nl)
             except Exception as e:
                 self.after(0, self.status.set, f"Netlist без ИИ не удался: {e}")

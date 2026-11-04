@@ -37,6 +37,7 @@ PREFIX2TYPE = {"R": "R", "RP": "R", "C": "C", "L": "L", "VD": "D", "D": "D", "VT
                "BQ": "ENC", "BH": "HALL", "KT": "K", "BR": "TACHO", "BP": "SENSOR", "BK": "TC", "RK": "RT", "ZQ": "XTAL", "M": "MOTOR",
                "VS": "VS", "TR": "T", "Z": "Z"}
 # совместимость типов (класс символа и буква обозначения могут разойтись законно)
+LABEL_SURE = 0.7        # подпись с меньшей уверенностью OCR оставляем, но помечаем как сомнительную
 COMPAT = {("Q", "M"), ("M", "Q"), ("D", "Z"), ("Z", "D"), ("D", "LED"), ("LED", "D"), ("LAMP", "LED"),
           ("U", "MCU"), ("MCU", "U"), ("SW", "BTN"), ("BTN", "SW"), ("R", "RT"), ("RT", "R"), ("J", "TERM"),
           ("TERM", "J"), ("Q", "IGBT"), ("K", "SW")}
@@ -107,7 +108,7 @@ def read_inside(res, gray, engine=None):
         txt, conf = engine.word(gray, (x0 + m, y0 + m, x1 - m, y1 - m), vertical=h > 1.6 * w)
         v = ocrmod.fix_value(txt)
         if v and conf > 0.3:
-            s["inside_value"] = v
+            s["inside_value"], s["inside_conf"] = v, round(conf, 2)
     return res
 
 
@@ -180,12 +181,14 @@ def build(res, title="Автоматический разбор (без ИИ)", 
                 cost += 1.5                                  # тип не сходится — можно, но хуже
             pairs.append((cost, t["id"], sid))
             geo.setdefault(t["id"], []).append((d / size(s["box"]), sid))
-    used_t, ref_of = set(), {}
+    used_t, ref_of, label_conf = set(), {}, {}
     for cost, tid, sid in sorted(pairs):
         if tid in used_t or sid in ref_of:
             continue
         used_t.add(tid)
-        ref_of[sid] = next(t for t in texts if t["id"] == tid)["ref"]
+        t = next(t for t in texts if t["id"] == tid)
+        ref_of[sid] = t["ref"]
+        label_conf.setdefault(sid, {})["ref"] = t.get("conf", 1.0)
         # подпись однозначно этой детали: она ближайшая и заметно ближе следующей по близости
         g = sorted(geo[tid])
         if g[0][1] == sid and (len(g) == 1 or g[1][0] - g[0][0] >= REF_MARGIN):
@@ -215,11 +218,15 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             if d <= 3 * size(s["box"]):
                 vpairs.append((d / size(s["box"]), t["id"], sid))
     val_of = {sid: s["inside_value"] for sid, s in syms.items() if s.get("inside_value")}
+    for sid in val_of:
+        label_conf.setdefault(sid, {})["value"] = syms[sid].get("inside_conf", 1.0)
     for cost, tid, sid in sorted(vpairs):
         if tid in used_t or sid in val_of:
             continue
         used_t.add(tid)
-        val_of[sid] = next(t for t in texts if t["id"] == tid)["value"]
+        t = next(t for t in texts if t["id"] == tid)
+        val_of[sid] = t["value"]
+        label_conf.setdefault(sid, {})["value"] = t.get("conf", 1.0)
 
     # --- цепи: имя по метке, земля по знаку, одинаковые метки — одна цепь ---
     gnd_syms = {s["id"] for s in res["symbols"] if s["kind"] == "GND"}
@@ -321,6 +328,9 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             c["cell"] = f"{core.col_name(int(cx // cell))}{int(cy // cell) + 1}"
         if low or typ == "X":
             c["confidence"] = "low"
+        doubt = [k for k, v in label_conf.get(sid, {}).items() if v < LABEL_SURE]
+        if doubt:
+            c["doubtful"], c["confidence"] = doubt, "low"    # не угадываем: подпись на проверку
         comps.append(c)
     comps = merge_sections(comps)
     # одинаковые обозначения (OCR ошибся или схема) — второму добавить суффикс
@@ -344,18 +354,22 @@ def build(res, title="Автоматический разбор (без ИИ)", 
     if noref:
         questions.append({"cell": noref[0].get("cell", ""),
                           "text": f"Без прочитанного обозначения: {len(noref)} деталей (имена вида R?3)."})
+    unread = [c for c in comps if c.get("doubtful")]
+    if unread:
+        questions.append({"cell": unread[0].get("cell", ""),
+                          "text": f"Подписи читаются неуверенно: {len(unread)} деталей (поле doubtful)."})
     return {"title": title, "generated": "autonet", "components": comps, "nets": nets_meta, "questions": questions,
             "dropped_junk": junk}
 
 
-def run(project, progress=None, overwrite=False):
+def run(project, progress=None, overwrite=False, enhance=""):
     """Собрать netlist. Если проверенный netlist.json уже есть и overwrite=False —
     результат пишется в netlist_autonet.json, чтобы его не затереть."""
     project = Path(project)
     manifest = core.load_json(project / "manifest.json")
     gray = core.imread(project / "clean.png")[:, :, 0]
-    res = analyzer.analyze(project, ocr=True, progress=progress)
-    read_texts(res, gray)
+    res = analyzer.analyze(project, ocr=True, progress=progress, enhance=enhance)
+    read_texts(res, gray)                              # всегда по оригиналу, даже с улучшением
     read_inside(res, gray)
     nl = build(res, cell=manifest["grid"]["cell"])
     target = project / "netlist.json"
