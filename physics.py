@@ -224,7 +224,10 @@ class Physics:
                     stamp(k, a, g_on, vz)
                 else:
                     stamp(a, k, g_off)
-            Uf = np.linalg.solve(G, I)
+            try:
+                Uf = np.linalg.solve(G, I)
+            except np.linalg.LinAlgError:              # узел без пути к земле: решение наименьшими квадратами
+                Uf = np.linalg.lstsq(G, I, rcond=None)[0]
             U = dict(fixed)
             U.update({n: float(Uf[idx[n]]) for n in free})
             flip = False

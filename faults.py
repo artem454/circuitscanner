@@ -13,6 +13,7 @@
 """
 import copy
 import json
+import os
 import math
 import sys
 from pathlib import Path
@@ -197,7 +198,9 @@ def learn_stats(key, faults, circ):
                 cnt[f"{k}|{s}"] = cnt.get(f"{k}|{s}", 0) + 1
     stats[key] = cnt
     STATS.parent.mkdir(exist_ok=True)
-    STATS.write_text(json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+    tmp = STATS.with_suffix(f".{os.getpid()}.tmp")     # читатель никогда не увидит пустой файл
+    tmp.write_text(json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, STATS)
 
 
 def stats_factor(typ, roles, symptoms):

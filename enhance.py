@@ -33,14 +33,17 @@ def run_model(key, pairs):
     if not available(key):
         raise FileNotFoundError(f"нет модели {key} или Python в {CHAINNER}")
     rel, tile = MODELS[key]
-    args = [str(PYTHON), str(HERE / "enhance_worker.py"), str(CHAINNER / rel), str(tile)]
-    args += [str(p) for pair in pairs for p in pair]
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
-    r = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", env=env,
-                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    if r.returncode:
-        raise RuntimeError(r.stderr[-800:])
-    return [float(line.split("\t")[2]) for line in r.stdout.splitlines() if line.count("\t") == 2]
+    secs = []
+    for i in range(0, len(pairs), 60):                 # длина командной строки Windows ограничена
+        args = [str(PYTHON), str(HERE / "enhance_worker.py"), str(CHAINNER / rel), str(tile)]
+        args += [str(p) for pair in pairs[i:i + 60] for p in pair]
+        r = subprocess.run(args, capture_output=True, encoding="utf-8", errors="replace", env=env,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if r.returncode:
+            raise RuntimeError(r.stderr[-800:])
+        secs += [float(line.split("\t")[2]) for line in r.stdout.splitlines() if line.count("\t") == 2]
+    return secs
 
 
 def enhanced_gray(project, key):

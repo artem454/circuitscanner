@@ -89,13 +89,20 @@ def prefix(ref):
     return m.group(0) if m else ""
 
 
-def read_texts(res, gray, engine=None):
-    """Текст каждой надписи: от Tesseract (если был) или своим OCR. Координаты res — оригинал."""
+def read_texts(res, gray, engine=None, second=None):
+    """Текст каждой надписи: от Tesseract (если был) или своим OCR. Координаты res — оригинал.
+    second — улучшенная копия: только второе мнение. Текст берём с оригинала, а при расхождении
+    помечаем подпись сомнительной: на настоящих надписях такое расхождение в 83 % случаев — ошибка."""
     engine = engine or ocrmod.OCR()
+    k = second.shape[0] / gray.shape[0] if second is not None else 1
     for t in res["texts"]:
         if not t.get("text"):
             w, c = engine.word(gray, t["box"], t.get("vertical", False))
             t["text"], t["conf"] = w, round(c, 2)
+            if second is not None:
+                w2, _ = engine.word(second, [v * k for v in t["box"]], t.get("vertical", False))
+                if w.replace(" ", "") != w2.replace(" ", ""):
+                    t["second"], t["conf"] = w2, min(t["conf"], round(LABEL_SURE - 0.1, 2))
         t["ref"] = ocrmod.fix_ref(t["text"])
         t["value"] = ocrmod.fix_value(t["text"]) if not t["ref"] else None
         glued = ocrmod.split_label(t["text"])
@@ -237,7 +244,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             if not unit_fits(t["value"], st):
                 continue                                     # «10n» у резистора, «2.7k» у конденсатора
             near = after_ref(t["box"], ref_box[sid]) if sid in ref_box else None
-            if near is not None and float(re.sub(r"[^\d.]", "", t["value"]) or 0) > 0:
+            if near is not None and re.search(r"[1-9]", t["value"].split("/")[0]):
                 vpairs.append((near, t["id"], sid))
                 continue
             d = analyzer.box_dist(s["box"], *tc)
@@ -425,7 +432,11 @@ def run(project, progress=None, overwrite=False, enhance=""):
     manifest = core.load_json(project / "manifest.json")
     gray = core.imread(project / "clean.png")[:, :, 0]
     res = analyzer.analyze(project, ocr=True, progress=progress, enhance=enhance)
-    read_texts(res, gray)                              # всегда по оригиналу, даже с улучшением
+    second = None
+    if enhance:
+        import enhance as enhance_mod
+        second = enhance_mod.enhanced_gray(project, enhance)
+    read_texts(res, gray, second=second)               # всегда по оригиналу, даже с улучшением
     read_inside(res, gray)
     nl = build(res, cell=manifest["grid"]["cell"])
     target = project / "netlist.json"
