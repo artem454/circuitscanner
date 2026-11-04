@@ -118,10 +118,75 @@ def train(n_aug=10, seed=1):
 
 
 EXTRA = HERE / "learned" / "ocr_extra.npz"
+NET = HERE / "learned" / "ocr_net.npz"                 # сеть, читающая надпись целиком (обучена вне сканера)
+
+
+def _conv(x, w, pad):
+    """Свёртка без PyTorch: x (каналы, высота, ширина), w (выход, вход, высота, ширина)."""
+    x = np.pad(x, ((0, 0), (pad[0], pad[0]), (pad[1], pad[1])))
+    win = np.lib.stride_tricks.sliding_window_view(x, w.shape[2:], axis=(1, 2))
+    return np.tensordot(win, w, axes=([0, 3, 4], [1, 2, 3])).transpose(2, 0, 1)
+
+
+def _norm(x, n):
+    k = (-1, 1, 1)
+    return (x - n["mean"].reshape(k)) / np.sqrt(n["var"].reshape(k) + 1e-5) * n["gamma"].reshape(k) + n["beta"].reshape(k)
+
+
+class NetReader:
+    """Прогон сети из learned/ocr_net.npz на numpy."""
+    H = 32
+
+    def __init__(self):
+        d = np.load(NET, allow_pickle=False)
+        self.alphabet = str(d["alphabet"])
+        self.layers = []
+        for i in range(int(d["n"])):
+            kind = str(d[f"k{i}"])
+            if kind == "conv":
+                self.layers.append(("conv", d[f"w{i}"].astype(np.float32), tuple(int(v) for v in d[f"p{i}"])))
+            elif kind == "norm":
+                self.layers.append(("norm", {a: d[f"{a}{i}"].astype(np.float32) for a in ("mean", "var", "gamma", "beta")}, None))
+            elif kind == "pool":
+                self.layers.append(("pool", int(d[f"p{i}"]), None))
+            else:
+                self.layers.append(("relu", None, None))
+
+    def read(self, gray):
+        """gray — серая вырезка, чернила тёмные. Возвращает текст и среднюю уверенность по знакам."""
+        h, w = gray.shape
+        k = self.H / h
+        nw = max(self.H, min(480, int(round(w * k))))
+        g = cv2.resize(gray, (nw, self.H), interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_CUBIC)
+        if -nw % 4:
+            g = cv2.copyMakeBorder(g, 0, 0, 0, -nw % 4, cv2.BORDER_REPLICATE)
+        x = (255 - g.astype(np.float32))[None] / 255
+        for kind, a, b in self.layers:
+            if kind == "conv":
+                x = _conv(x, a, b)
+            elif kind == "norm":
+                x = _norm(x, a)
+            elif kind == "relu":
+                x = np.maximum(x, 0)
+            else:                                       # объединение: высота и, при a == 2, ширина вдвое
+                c, ht, wd = x.shape
+                y = x[:, :ht // 2 * 2, :wd // a * a]
+                x = y.reshape(c, ht // 2, 2, wd // a, a).max(axis=(2, 4))
+        p = np.exp(x[:, 0] - x[:, 0].max(axis=0))
+        p /= p.sum(axis=0)
+        ids, conf = p.argmax(axis=0), p.max(axis=0)
+        out, cs, prev = [], [], 0
+        for i, q in zip(ids, conf):
+            if i and i != prev:
+                out.append(self.alphabet[i - 1])
+                cs.append(float(q))
+            prev = i
+        return "".join(out).strip(), float(np.mean(cs)) if cs else 0.0
 
 
 class OCR:
     def __init__(self):
+        self.net = NetReader() if NET.exists() else None
         d = np.load(MODEL, allow_pickle=False)
         X, y = [d["X"].astype(np.float32)], [d["y"]]
         if EXTRA.exists():                              # буквы, вырезанные из настоящих и учебных схем
@@ -184,6 +249,8 @@ class OCR:
             return "", 0.0
         if vertical:
             crop = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
+        if self.net is not None and glyphs is None:
+            return self.net.read(crop)
         # мелкий текст — увеличить до ~30 пикселей по высоте, иначе буквы слипаются при пороге
         k = max(1.0, min(5.0, 30.0 / max(crop.shape[0], 1)))
         if k > 1.2:
@@ -287,6 +354,10 @@ def fix_ref(t):
     return None
 
 
+RU_UNITS = (("mkФ", "μF"), ("мкФ", "μF"), ("mk", "μ"), ("мк", "μ"), ("hФ", "nF"), ("нФ", "nF"), ("пФ", "pF"), ("mkГh", "μH"), ("мкГн", "μH"),
+            ("mГh", "mH"), ("мГн", "mH"), ("kOm", "k"), ("кОм", "k"), ("MOm", "M"), ("МОм", "M"), ("Om", ""), ("Ом", ""))
+
+
 def digits_fixed(t):
     """Буквы, похожие на цифры, рядом с цифрами: 22Q0 → 2200, 100 из I00, Q.Q47 → 0.047, 4J7 → 4.7."""
     t = re.sub(r"(?<=\d)J(?=\d)", ".", t)
@@ -301,8 +372,17 @@ def digits_fixed(t):
 def fix_value(t):
     """'2,2k' '2.2K' '4k7' '100n' '47μ' '1M' '0.22' → нормализованный номинал или None."""
     t = t.replace(" ", "").replace(",", ".")
+    for ru, en in RU_UNITS:                            # сеть читает и русские единицы
+        if t.endswith(ru):
+            t = t[:-len(ru)] + en
+            break
+    m = re.fullmatch(r"(.+?)[xX/](\d+)[VBВ]", t)        # «0.047x400V»
+    if m:
+        head = fix_value(m.group(1))
+        return f"{head}/{m.group(2)}V" if head else None
     if not t or len(t) > 9:
         return None
+    t = re.sub(r"(?<=\d)[BВ]$", "V", t)
     t = t.replace("u", "μ").replace("U", "μ")
     head = "".join(TO_DIGIT.get(c, c) if i == 0 else c for i, c in enumerate(t))
     head = digits_fixed(head)
