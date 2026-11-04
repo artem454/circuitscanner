@@ -84,6 +84,22 @@ def binarize(gray):
     return bw
 
 
+def dark_margins(gray):
+    """Сплошные тёмные поля по краям (кадр из видео): (сверху, снизу, слева, справа) в px. Они не схема,
+    но сдвигают порог чернил, и бледные линии пропадают. Рамка чертежа тоньше и полями не считается."""
+    H, W = gray.shape
+    rows, cols = (gray < 60).mean(axis=1) > 0.97, (gray < 60).mean(axis=0) > 0.97
+
+    def run(flags, limit):
+        n = 0
+        while n < len(flags) and flags[n]:
+            n += 1
+        return n if n >= limit else 0
+
+    return (run(rows, max(8, 0.015 * H)), run(rows[::-1], max(8, 0.015 * H)),
+            run(cols, max(8, 0.015 * W)), run(cols[::-1], max(8, 0.015 * W)))
+
+
 def stroke_width(bw):
     """Самая частая длина коротких серий чернил по строкам и столбцам = толщина линии."""
     lengths = []
@@ -1069,12 +1085,20 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None, enhanced=None):
     H0, W0 = gray0.shape
     s = int(max(1, min(4, round(P["target"] / max(H0, W0)))))
 
+    margins = dark_margins(gray0)
+
     def at_scale(k):
         plain = cv2.resize(gray0, None, fx=k, fy=k, interpolation=cv2.INTER_CUBIC) if k > 1 else gray0.copy()
-        if enhanced is None:
-            return plain, plain
-        how = cv2.INTER_AREA if enhanced.shape[1] > W0 * k else cv2.INTER_CUBIC
-        return cv2.resize(enhanced, (W0 * k, H0 * k), interpolation=how), plain
+        better = plain
+        if enhanced is not None:
+            how = cv2.INTER_AREA if enhanced.shape[1] > W0 * k else cv2.INTER_CUBIC
+            better = cv2.resize(enhanced, (W0 * k, H0 * k), interpolation=how)
+        if any(margins):                         # +2 px на размытый край поля
+            top, bottom, left, right = ((m + 2) * k if m else 0 for m in margins)
+            for im in (plain, better):
+                im[:top], im[H0 * k - bottom:] = 255, 255
+                im[:, :left], im[:, W0 * k - right:] = 255, 255
+        return better, plain
 
     gray, gray_text = at_scale(s)
     H, W = gray.shape
