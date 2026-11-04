@@ -130,6 +130,36 @@ def box_center(b):
 
 # ---------- надписи ----------
 
+def drop_big_text(ink, sw, P):
+    """Убрать строки крупных букв (заголовок на картинке): для обычных надписей буквы слишком велики,
+    и слипшиеся буквы принимаются за детали. Строка — не меньше 8 отдельных компонент на одной высоте."""
+    n, lab, st, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
+    H, W = ink.shape
+    tmax = max(P["text_max"] * sw, 24)
+    big = [i for i in range(1, n) if 0.6 * tmax <= st[i][3] <= 0.2 * H and st[i][2] <= 0.3 * W]
+    uf = UnionFind(len(big))
+    for a, i in enumerate(big):
+        xi, yi, wi, hi = st[i][:4]
+        for b, j in enumerate(big[:a]):
+            xj, yj, wj, hj = st[j][:4]
+            vov = min(yi + hi, yj + hj) - max(yi, yj)
+            gap = max(xi, xj) - min(xi + wi, xj + wj)
+            if vov >= 0.5 * min(hi, hj) and gap <= max(hi, hj) and max(hi, hj) <= 2 * min(hi, hj):
+                uf.union(a, b)
+    lines = {}
+    for a, i in enumerate(big):
+        lines.setdefault(uf.find(a), []).append(i)
+    drop = []
+    for g in lines.values():
+        hs = [st[i][3] for i in g]
+        if len(g) >= P.get("big_text_n", 8) and max(hs) >= tmax and np.median(hs) >= 0.75 * tmax:
+            drop.extend(g)
+    if drop:
+        ink = ink.copy()
+        ink[np.isin(lab, drop)] = 0
+    return ink
+
+
 def find_text(ink, sw, P):
     """Отдельно стоящие мелкие компоненты = буквы; склеиваем их в слова."""
     n, lab, st, _ = cv2.connectedComponentsWithStats(ink, connectivity=8)
@@ -1129,6 +1159,7 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None, enhanced=None):
     sw_dot = min(sw, P.get("dot_cap", 0.0045) * max(W, H)) if P.get("dot_cap", 0.0045) else sw
 
     step("надписи")
+    ink = drop_big_text(ink, sw, P)
     words, text_mask = find_text(ink, sw, P)
     work = cv2.subtract(ink, text_mask)
 
