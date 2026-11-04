@@ -294,19 +294,54 @@ def fix_value(t):
         return None
     t = t.replace("u", "μ").replace("U", "μ")
     head = "".join(TO_DIGIT.get(c, c) if i == 0 else c for i, c in enumerate(t))
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)([pnμmkKMR])?(\d*)(F|Ω|V|W)?", head)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([pnμmkKMR])?(\d*)(F|Ω|V|W|H)?", head)
     if not m:
         m2 = re.fullmatch(r"(\d+)([pnμkKMR])(\d+)", head)        # 4k7
         if not m2:
             return None
         return f"{m2.group(1)}.{m2.group(3)}{m2.group(2).replace('K', 'k')}"
     num, mult, tail, unit = m.groups()
+    if tail and mult and unit == "V":
+        return f"{num}{mult}/{tail}V"                # «100n400V» — ёмкость и напряжение
     if tail and mult:
         num = f"{num}.{tail}"
     elif tail:
         return None
     mult = (mult or "").replace("K", "k").replace("R", "")
     return f"{num}{mult}{unit or ''}"
+
+
+GLUE_UNITS = {"R": "kKMR", "C": "pnuμUNP", "L": "mnuμU"}
+
+
+def split_label(t):
+    """Обозначение и номинал, слипшиеся в одну надпись: «C1 100n», «R210K» → ('R2', '10k').
+    Без пробела делим, только если вариант один, иначе (R147k) None: лучше не угадывать."""
+    parts = t.split()
+    if len(parts) > 1:
+        ref, val = fix_ref(parts[0]), fix_value("".join(parts[1:]))
+        return (ref, val) if ref and val else None
+    m = re.fullmatch(r"([RCL])(\d{2,6}[.\d]*)([A-Za-zμ])(.*)", t)
+    if not m or m.group(3) not in GLUE_UNITS[m.group(1)]:
+        return None
+    p, digits, tail = m.group(1), m.group(2), m.group(3) + m.group(4)
+    found = []
+    for cut in range(1, min(4, len(digits))):
+        rest = digits[cut:]
+        if rest[0] not in "0.":
+            val = fix_value(rest + tail)
+            if val:
+                found.append((p + digits[:cut], val))
+    return found[0] if len(found) == 1 else None
+
+
+PART = re.compile(r"(?=.*\d)(?=.*[A-Z])[A-Z0-9][A-Z0-9-]{3,11}")
+
+
+def fix_part(t):
+    """Название детали: 1N4148, BC847, MC34063, BTB04-600. None, если не похоже."""
+    t = t.replace(" ", "").upper()
+    return t if PART.fullmatch(t) else None
 
 
 NET_NAMES = re.compile(r"^([+-]?\d{1,3}([.,]\d)?[VВ]|GND|0V|AGND|DGND|VCC|VDD|VEE|VSS|[+-]U\w*|L\d?|N|PE)$", re.I)

@@ -37,6 +37,7 @@ PREFIX2TYPE = {"R": "R", "RP": "R", "C": "C", "L": "L", "VD": "D", "D": "D", "VT
                "BQ": "ENC", "BH": "HALL", "KT": "K", "BR": "TACHO", "BP": "SENSOR", "BK": "TC", "RK": "RT", "ZQ": "XTAL", "M": "MOTOR",
                "VS": "VS", "TR": "T", "Z": "Z"}
 # совместимость типов (класс символа и буква обозначения могут разойтись законно)
+PART_TYPES = {"D", "Z", "LED", "Q", "M", "U", "VS"}   # чей «номинал» — название детали
 LABEL_SURE = 0.7        # подпись с меньшей уверенностью OCR оставляем, но помечаем как сомнительную
 COMPAT = {("Q", "M"), ("M", "Q"), ("D", "Z"), ("Z", "D"), ("D", "LED"), ("LED", "D"), ("LAMP", "LED"),
           ("U", "MCU"), ("MCU", "U"), ("SW", "BTN"), ("BTN", "SW"), ("R", "RT"), ("RT", "R"), ("J", "TERM"),
@@ -85,7 +86,11 @@ def read_texts(res, gray, engine=None):
             t["text"], t["conf"] = w, round(c, 2)
         t["ref"] = ocrmod.fix_ref(t["text"])
         t["value"] = ocrmod.fix_value(t["text"]) if not t["ref"] else None
+        glued = ocrmod.split_label(t["text"])
+        if glued:
+            t["ref"], t["value"], t["ref_value"] = glued[0], None, glued[1]
         t["net"] = ocrmod.fix_net(t["text"])
+        t["part"] = ocrmod.fix_part(t["text"]) if not (t["ref"] or t["value"] or t["net"]) else None
     return res
 
 
@@ -181,7 +186,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
                 cost += 1.5                                  # тип не сходится — можно, но хуже
             pairs.append((cost, t["id"], sid))
             geo.setdefault(t["id"], []).append((d / size(s["box"]), sid))
-    used_t, ref_of, label_conf = set(), {}, {}
+    used_t, ref_of, label_conf, glued_value = set(), {}, {}, {}
     for cost, tid, sid in sorted(pairs):
         if tid in used_t or sid in ref_of:
             continue
@@ -189,6 +194,8 @@ def build(res, title="Автоматический разбор (без ИИ)", 
         t = next(t for t in texts if t["id"] == tid)
         ref_of[sid] = t["ref"]
         label_conf.setdefault(sid, {})["ref"] = t.get("conf", 1.0)
+        if t.get("ref_value"):
+            glued_value[sid] = t["ref_value"]
         # подпись однозначно этой детали: она ближайшая и заметно ближе следующей по близости
         g = sorted(geo[tid])
         if g[0][1] == sid and (len(g) == 1 or g[1][0] - g[0][0] >= REF_MARGIN):
@@ -220,12 +227,33 @@ def build(res, title="Автоматический разбор (без ИИ)", 
     val_of = {sid: s["inside_value"] for sid, s in syms.items() if s.get("inside_value")}
     for sid in val_of:
         label_conf.setdefault(sid, {})["value"] = syms[sid].get("inside_conf", 1.0)
+    for sid, v in glued_value.items():
+        if sid not in val_of:
+            val_of[sid] = v
+            label_conf.setdefault(sid, {})["value"] = label_conf[sid]["ref"]
     for cost, tid, sid in sorted(vpairs):
         if tid in used_t or sid in val_of:
             continue
         used_t.add(tid)
         t = next(t for t in texts if t["id"] == tid)
         val_of[sid] = t["value"]
+        label_conf.setdefault(sid, {})["value"] = t.get("conf", 1.0)
+    # название детали (1N4148, BC847) — номинал полупроводников и микросхем
+    ppairs = []
+    for t in texts:
+        if t.get("part") and t["id"] not in used_t:
+            tc = _center(t["box"])
+            for sid, s in syms.items():
+                st = KIND2TYPE.get(s["kind"]) or PREFIX2TYPE.get(prefix(ref_of.get(sid, "")))
+                d = analyzer.box_dist(s["box"], *tc)
+                if st in PART_TYPES and sid not in val_of and d <= 3 * size(s["box"]):
+                    ppairs.append((d / size(s["box"]), t["id"], sid))
+    for cost, tid, sid in sorted(ppairs):
+        if tid in used_t or sid in val_of:
+            continue
+        used_t.add(tid)
+        t = next(t for t in texts if t["id"] == tid)
+        val_of[sid] = t["part"]
         label_conf.setdefault(sid, {})["value"] = t.get("conf", 1.0)
 
     # --- цепи: имя по метке, земля по знаку, одинаковые метки — одна цепь ---
