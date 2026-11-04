@@ -287,6 +287,17 @@ def fix_ref(t):
     return None
 
 
+def digits_fixed(t):
+    """Буквы, похожие на цифры, рядом с цифрами: 22Q0 → 2200, 100 из I00, Q.Q47 → 0.047, 4J7 → 4.7."""
+    t = re.sub(r"(?<=\d)J(?=\d)", ".", t)
+    out = list(t)
+    for i, c in enumerate(t):
+        if c in "QOoIl" and ((i + 1 < len(t) and (t[i + 1].isdigit() or t[i + 1] in "QOoIl."))
+                             or (i and t[i - 1].isdigit()) or (i and t[i - 1] == ".")):
+            out[i] = TO_DIGIT[c]
+    return "".join(out)
+
+
 def fix_value(t):
     """'2,2k' '2.2K' '4k7' '100n' '47μ' '1M' '0.22' → нормализованный номинал или None."""
     t = t.replace(" ", "").replace(",", ".")
@@ -294,6 +305,7 @@ def fix_value(t):
         return None
     t = t.replace("u", "μ").replace("U", "μ")
     head = "".join(TO_DIGIT.get(c, c) if i == 0 else c for i, c in enumerate(t))
+    head = digits_fixed(head)
     m = re.fullmatch(r"(\d+(?:\.\d+)?)([pnμmkKMR])?(\d*)(F|Ω|V|W|H)?", head)
     if not m:
         m2 = re.fullmatch(r"(\d+)([pnμkKMR])(\d+)", head)        # 4k7
@@ -311,16 +323,28 @@ def fix_value(t):
     return f"{num}{mult}{unit or ''}"
 
 
-GLUE_UNITS = {"R": "kKMR", "C": "pnuμUNP", "L": "mnuμU"}
+GLUE_UNITS = {"R": "kKMR", "C": "pnuμUNPMm", "L": "mnuμU"}
+E24 = {10, 11, 12, 13, 15, 16, 18, 20, 22, 24, 27, 30, 33, 36, 39, 43, 47, 51, 56, 62, 68, 75, 82, 91}
+
+
+def in_e24(v):
+    """Стандартный ли номинал: первые две значащие цифры из ряда E24."""
+    d = re.sub(r"\D", "", v.split("/")[0]).lstrip("0")
+    return bool(d) and int((d + "0")[:2]) in E24
 
 
 def split_label(t):
-    """Обозначение и номинал, слипшиеся в одну надпись: «C1 100n», «R210K» → ('R2', '10k').
-    Без пробела делим, только если вариант один, иначе (R147k) None: лучше не угадывать."""
+    """Обозначение и номинал, слипшиеся в одну надпись: «C1 100n», «R210K» → ('R2', '10k', True).
+    Без пробела варианты отбираем по ряду E24; третье значение — раздел однозначен. Если подходят
+    несколько (R833K), берём короткое обозначение и говорим, что не уверены."""
     parts = t.split()
     if len(parts) > 1:
         ref, val = fix_ref(parts[0]), fix_value("".join(parts[1:]))
-        return (ref, val) if ref and val else None
+        return (ref, val, True) if ref and val else None
+    t = digits_fixed(t)
+    m = re.fullmatch(r"(C)(\d{1,3})(0\.\d+)", t)            # C80.47 — «C8» и «0.47»
+    if m:
+        return m.group(1) + m.group(2), m.group(3), True
     m = re.fullmatch(r"([RCL])(\d{2,6}[.\d]*)([A-Za-zμ])(.*)", t)
     if not m or m.group(3) not in GLUE_UNITS[m.group(1)]:
         return None
@@ -328,20 +352,28 @@ def split_label(t):
     found = []
     for cut in range(1, min(4, len(digits))):
         rest = digits[cut:]
-        if rest[0] not in "0.":
+        if rest[0] not in "0." and "." not in digits[:cut]:
             val = fix_value(rest + tail)
             if val:
                 found.append((p + digits[:cut], val))
-    return found[0] if len(found) == 1 else None
+    std = [f for f in found if in_e24(f[1])] or found
+    return (*std[0], len(std) == 1) if std else None
 
 
-PART = re.compile(r"(?=.*\d)(?=.*[A-Z])[A-Z0-9][A-Z0-9-]{3,11}")
+PARTS = (("D", r"1N\d{3,4}\w?|HER\d{3}|FR\d{3}|UF\d{4}|SS\d{2}|BA[TV]\d+\w?|DB\d"),
+         ("Q", r"[23]N\d{4}\w?|BC\d{3}\w?|BD\d{3}\w?|BF\d{3}\w?|S\d{4}|IRF\w{3,7}|KT\d{3,4}\w?"),
+         ("U", r"MC\d{4,5}\w?|LM\d{3,4}\w?|NE\d{3}\w?|TL\d{3}\w?|UC\d{4}\w?|XL\d{4}|CR\d{4}\w?"),
+         ("VS", r"BT[AB]\d{2}-\d{3}\w?"))
 
 
 def fix_part(t):
-    """Название детали: 1N4148, BC847, MC34063, BTB04-600. None, если не похоже."""
+    """Название детали из известного семейства и к какому типу оно относится: ('BC847', 'Q').
+    Только семейства: иначе за название принимается нечитаемый мусор."""
     t = t.replace(" ", "").upper()
-    return t if PART.fullmatch(t) else None
+    for typ, pattern in PARTS:
+        if re.fullmatch(pattern, t):
+            return t, typ
+    return None
 
 
 NET_NAMES = re.compile(r"^([+-]?\d{1,3}([.,]\d)?[VВ]|GND|0V|AGND|DGND|VCC|VDD|VEE|VSS|[+-]U\w*|L\d?|N|PE)$", re.I)

@@ -37,7 +37,7 @@ PREFIX2TYPE = {"R": "R", "RP": "R", "C": "C", "L": "L", "VD": "D", "D": "D", "VT
                "BQ": "ENC", "BH": "HALL", "KT": "K", "BR": "TACHO", "BP": "SENSOR", "BK": "TC", "RK": "RT", "ZQ": "XTAL", "M": "MOTOR",
                "VS": "VS", "TR": "T", "Z": "Z"}
 # совместимость типов (класс символа и буква обозначения могут разойтись законно)
-PART_TYPES = {"D", "Z", "LED", "Q", "M", "U", "VS"}   # чей «номинал» — название детали
+PART_GROUP = {"D": "D", "Z": "D", "LED": "D", "Q": "Q", "M": "Q", "U": "U", "VS": "VS"}   # чьё название детали
 LABEL_SURE = 0.7        # подпись с меньшей уверенностью OCR оставляем, но помечаем как сомнительную
 COMPAT = {("Q", "M"), ("M", "Q"), ("D", "Z"), ("Z", "D"), ("D", "LED"), ("LED", "D"), ("LAMP", "LED"),
           ("U", "MCU"), ("MCU", "U"), ("SW", "BTN"), ("BTN", "SW"), ("R", "RT"), ("RT", "R"), ("J", "TERM"),
@@ -62,7 +62,7 @@ def unit_fits(v, typ):
     if not v or typ is None:
         return True
     cap = bool(re.search(r"[pnμ]|F$", v))
-    res = bool(re.search(r"[kMΩ]", v))
+    res = bool(re.search(r"[kMΩ]", v)) and not v.endswith("F")   # 47MF — микрофарады
     if typ in ("R", "RT"):
         return not cap
     if typ == "C":
@@ -89,6 +89,8 @@ def read_texts(res, gray, engine=None):
         glued = ocrmod.split_label(t["text"])
         if glued:
             t["ref"], t["value"], t["ref_value"] = glued[0], None, glued[1]
+            if not glued[2]:
+                t["conf"] = min(t.get("conf", 1.0), LABEL_SURE - 0.1)   # разделить можно по-разному
         t["net"] = ocrmod.fix_net(t["text"])
         t["part"] = ocrmod.fix_part(t["text"]) if not (t["ref"] or t["value"] or t["net"]) else None
     return res
@@ -220,7 +222,11 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             if not unit_fits(t["value"], st):
                 continue                                     # «10n» у резистора, «2.7k» у конденсатора
             d = analyzer.box_dist(s["box"], *tc)
-            if bare_number(t["value"]) and d > 0.35 * size(s["box"]):
+            digits = len(t["value"].replace(".", ""))
+            if bare_number(t["value"]) and digits < 2:
+                continue                                     # одна цифра — номер вывода
+            sure_number = digits >= 3 and ocrmod.in_e24(t["value"])    # 330, 0.01
+            if bare_number(t["value"]) and d > (1.0 if sure_number else 0.35) * size(s["box"]):
                 continue                                     # «7», «10» в стороне — скорее номер вывода
             if d <= 3 * size(s["box"]):
                 vpairs.append((d / size(s["box"]), t["id"], sid))
@@ -246,14 +252,14 @@ def build(res, title="Автоматический разбор (без ИИ)", 
             for sid, s in syms.items():
                 st = KIND2TYPE.get(s["kind"]) or PREFIX2TYPE.get(prefix(ref_of.get(sid, "")))
                 d = analyzer.box_dist(s["box"], *tc)
-                if st in PART_TYPES and sid not in val_of and d <= 3 * size(s["box"]):
+                if PART_GROUP.get(st) == t["part"][1] and sid not in val_of and d <= 3 * size(s["box"]):
                     ppairs.append((d / size(s["box"]), t["id"], sid))
     for cost, tid, sid in sorted(ppairs):
         if tid in used_t or sid in val_of:
             continue
         used_t.add(tid)
         t = next(t for t in texts if t["id"] == tid)
-        val_of[sid] = t["part"]
+        val_of[sid] = t["part"][0]
         label_conf.setdefault(sid, {})["value"] = t.get("conf", 1.0)
 
     # --- цепи: имя по метке, земля по знаку, одинаковые метки — одна цепь ---

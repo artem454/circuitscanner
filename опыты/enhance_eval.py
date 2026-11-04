@@ -79,8 +79,17 @@ def scaled_truth(nl, k):
     return out
 
 
+RU_UNITS = (("мкф", "μ"), ("мкгн", "μH"), ("нф", "n"), ("пф", "p"), ("ком", "k"), ("мом", "M"), ("ом", ""))
+
+
 def norm_value(v):
-    v = str(v or "").split("/")[0].split(" ")[0]
+    """Ответ и разбор к одному виду: русские единицы и разные символы «мю» — не ошибка чтения."""
+    v = str(v or "").split("/")[0].split(" ")[0].replace("µ", "μ")
+    low = v.lower()
+    for ru, en in RU_UNITS:
+        if low.endswith(ru):
+            v = v[:len(v) - len(ru)] + en
+            break
     return ocrmod.fix_value(v) or v
 
 
