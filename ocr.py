@@ -372,10 +372,14 @@ def digits_fixed(t):
 def fix_value(t):
     """'2,2k' '2.2K' '4k7' '100n' '47μ' '1M' '0.22' → нормализованный номинал или None."""
     t = t.replace(" ", "").replace(",", ".")
+    low = t.lower()
     for ru, en in RU_UNITS:                            # сеть читает и русские единицы
-        if t.endswith(ru):
+        if low.endswith(ru.lower()):
             t = t[:-len(ru)] + en
             break
+    t = re.sub(r"(?<=\d)PF$", "pF", t)
+    t = re.sub(r"(?<=\d)NF$", "nF", t)
+    t = re.sub(r"(?<=\d)E$", "", t)                     # 680E — омы
     m = re.fullmatch(r"(.+?)[xX/](\d+)[VBВ]", t)        # «0.047x400V»
     if m:
         head = fix_value(m.group(1))
@@ -440,10 +444,10 @@ def split_label(t):
     return (*std[0], len(std) == 1) if std else None
 
 
-PARTS = (("D", r"1N\d{3,4}\w?|HER\d{3}|FR\d{3}|UF\d{4}|SS\d{2}|BA[TV]\d+\w?|DB\d"),
+PARTS = (("D", r"1N\d{3,4}\w?|HER\d{3}|FR\d{3}|UF\d{4}|SS\d{2}|BA[TV]\d+\w?|DB\d|K[ДD]\d{3}\w?|AЛ\d{3}\w?"),
          ("Q", r"[23]N\d{4}\w?|BC\d{3}\w?|BD\d{3}\w?|BF\d{3}\w?|S\d{4}|IRF\w{3,7}|KT\d{3,4}\w?"),
          ("U", r"MC\d{4,5}\w?|LM\d{3,4}\w?|NE\d{3}\w?|TL\d{3}\w?|UC\d{4}\w?|XL\d{4}|CR\d{4}\w?"),
-         ("VS", r"BT[AB]\d{2}-\d{3}\w?"))
+         ("VS", r"BT[AB]\d{2}-\d{3}\w?|BT\d{3}\w*"))
 
 
 def fix_part(t):

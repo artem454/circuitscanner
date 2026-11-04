@@ -46,6 +46,7 @@ NOT_PARTS = {"GND", "PORT"}
 GENERIC = {"U", "X", None}         # «прямоугольник» и неопознанное — тип берём из буквы обозначения
 # что рисуют прямоугольником с двумя выводами: у такого корпуса верим букве обозначения, а не форме
 REF_WINS_UNSURE = True             # …но если сами модели формы разошлись — букве верим
+NEAR_X, NEAR_Y = 1.0, 1.2           # «вплотную к обозначению»: в высотах надписи
 REF_MARGIN = 0.5                   # «однозначно ближе»: в размерах символа
 REF_WINS = False                   # тип по букве, если форма спорит. Выключено: учебные +4, тест −4 (подпись
                                    # ненайденного резистора достаётся соседнему конденсатору)
@@ -72,6 +73,17 @@ def unit_fits(v, typ):
     return True
 
 
+def after_ref(box, ref_box):
+    """Стоит ли надпись вплотную к обозначению: цена привязки или None. Ниже или правее — по порядку
+    чтения: обозначение, затем номинал; поэтому у соседа сверху эта надпись дешевле, чем у соседа снизу."""
+    h = min(box[3] - box[1], ref_box[3] - ref_box[1]) + 1
+    dx = max(0, box[0] - ref_box[2], ref_box[0] - box[2])
+    dy = max(0, box[1] - ref_box[3], ref_box[1] - box[3])
+    if (dx <= 0.5 * h and dy <= NEAR_Y * h) or (dy <= 0.5 * h and dx <= NEAR_X * h):
+        return 0.02 if box[1] >= ref_box[3] - 0.3 * h or box[0] >= ref_box[2] - 0.3 * h else 0.06
+    return None
+
+
 def prefix(ref):
     m = re.match(r"[A-Z]+", ref or "")
     return m.group(0) if m else ""
@@ -92,7 +104,9 @@ def read_texts(res, gray, engine=None):
             if not glued[2]:
                 t["conf"] = min(t.get("conf", 1.0), LABEL_SURE - 0.1)   # разделить можно по-разному
         t["net"] = ocrmod.fix_net(t["text"])
-        t["part"] = ocrmod.fix_part(t["text"]) if not (t["ref"] or t["value"] or t["net"]) else None
+        t["part"] = ocrmod.fix_part(t["text"]) if not t["value"] else None
+        if t["part"]:
+            t["ref"] = t["ref_value"] = None                 # KT816A, S8550 — название, а не обозначение
     return res
 
 
@@ -188,13 +202,14 @@ def build(res, title="Автоматический разбор (без ИИ)", 
                 cost += 1.5                                  # тип не сходится — можно, но хуже
             pairs.append((cost, t["id"], sid))
             geo.setdefault(t["id"], []).append((d / size(s["box"]), sid))
-    used_t, ref_of, label_conf, glued_value = set(), {}, {}, {}
+    used_t, ref_of, ref_box, label_conf, glued_value = set(), {}, {}, {}, {}
     for cost, tid, sid in sorted(pairs):
         if tid in used_t or sid in ref_of:
             continue
         used_t.add(tid)
         t = next(t for t in texts if t["id"] == tid)
         ref_of[sid] = t["ref"]
+        ref_box[sid] = t["box"]
         label_conf.setdefault(sid, {})["ref"] = t.get("conf", 1.0)
         if t.get("ref_value"):
             glued_value[sid] = t["ref_value"]
@@ -221,6 +236,10 @@ def build(res, title="Автоматический разбор (без ИИ)", 
                 continue
             if not unit_fits(t["value"], st):
                 continue                                     # «10n» у резистора, «2.7k» у конденсатора
+            near = after_ref(t["box"], ref_box[sid]) if sid in ref_box else None
+            if near is not None and float(re.sub(r"[^\d.]", "", t["value"]) or 0) > 0:
+                vpairs.append((near, t["id"], sid))
+                continue
             d = analyzer.box_dist(s["box"], *tc)
             digits = len(t["value"].replace(".", ""))
             if bare_number(t["value"]) and digits < 2:
@@ -250,9 +269,12 @@ def build(res, title="Автоматический разбор (без ИИ)", 
         if t.get("part") and t["id"] not in used_t:
             tc = _center(t["box"])
             for sid, s in syms.items():
-                st = KIND2TYPE.get(s["kind"]) or PREFIX2TYPE.get(prefix(ref_of.get(sid, "")))
+                st = PREFIX2TYPE.get(prefix(ref_of.get(sid, ""))) or KIND2TYPE.get(s["kind"])
                 d = analyzer.box_dist(s["box"], *tc)
-                if PART_GROUP.get(st) == t["part"][1] and sid not in val_of and d <= 3 * size(s["box"]):
+                near = after_ref(t["box"], ref_box[sid]) if sid in ref_box else None
+                if st in PART_GROUP and sid not in val_of and near is not None:
+                    ppairs.append((near, t["id"], sid))
+                elif PART_GROUP.get(st) == t["part"][1] and sid not in val_of and d <= 3 * size(s["box"]):
                     ppairs.append((d / size(s["box"]), t["id"], sid))
     for cost, tid, sid in sorted(ppairs):
         if tid in used_t or sid in val_of:
