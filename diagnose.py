@@ -290,7 +290,8 @@ def parse_value(s):
     m = re.search(r"(\d+(?:\.\d+)?)\s*[VВ](?![a-zA-Zа-я])", s)
     if m and ("/" in s or s.upper().endswith(("V", "В"))):
         vmax = float(m.group(1))
-    head = s.split("/")[0]
+    head = s.split("/")[0].replace("μ", "u")
+    head = re.sub(r"M(?=[FФ]$)", "u", head)               # 47MF — микрофарады, мегафарад не бывает
     m = re.match(r"^(\d+(?:\.\d+)?)(мк|[pпnнuµmмkкMМG])?", head)
     if not m:
         return None, vmax
