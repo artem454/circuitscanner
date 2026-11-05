@@ -486,6 +486,14 @@ def build(res, title="Автоматический разбор (без ИИ)", 
         nm = final[find(n["id"])]
         if n["dangling"] or n["labels"]:
             nets_meta.setdefault(nm, {})["port"] = True
+    # знаки земли и питания — в список, чтобы их было видно и можно было выбрать на схеме
+    net_of = {p["symbol"]: final[find(n["id"])] for n in res["nets"] for p in n["pins"]}
+    power = []
+    for s in res["symbols"]:
+        if s["kind"] in NOT_PARTS and not s.get("junk"):
+            cx, cy = _center(s["box"])
+            power.append({"type": "GND" if s["kind"] == "GND" else "PORT", "box": [round(v, 1) for v in s["box"]], "net": net_of.get(s["id"], ""),
+                          "cell": f"{core.col_name(int(cx // cell))}{int(cy // cell) + 1}" if cell else ""})
     unk = [c for c in comps if c["type"] == "X"]
     if unk:
         questions.append({"cell": unk[0].get("cell", ""), "text": f"Не опознано символов: {len(unk)} (тип X)."})
@@ -497,7 +505,7 @@ def build(res, title="Автоматический разбор (без ИИ)", 
     if unread:
         questions.append({"cell": unread[0].get("cell", ""),
                           "text": f"Подписи читаются неуверенно: {len(unread)} деталей (поле doubtful)."})
-    return {"title": title, "generated": "autonet", "components": comps, "nets": nets_meta, "questions": questions,
+    return {"title": title, "generated": "autonet", "components": comps, "nets": nets_meta, "power_symbols": power, "questions": questions,
             "dropped_junk": junk}
 
 
