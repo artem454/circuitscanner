@@ -18,6 +18,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 import analyzer
@@ -46,6 +47,8 @@ NOT_PARTS = {"GND", "PORT"}
 GENERIC = {"U", "X", None}         # «прямоугольник» и неопознанное — тип берём из буквы обозначения
 # что рисуют прямоугольником с двумя выводами: у такого корпуса верим букве обозначения, а не форме
 REF_WINS_UNSURE = True             # …но если сами модели формы разошлись — букве верим
+TEXT_SURE = 0.9                     # уверенность сети, с которой символ считаем надписью
+TEXT_LIKE = {"C", "TERM", "PORT", "?", "X"}   # что чаще всего выходит из букв
 NEAR_X, NEAR_Y = 1.0, 1.2           # «вплотную к обозначению»: в высотах надписи
 REF_MARGIN = 0.5                   # «однозначно ближе»: в размерах символа
 REF_WINS = False                   # тип по букве, если форма спорит. Выключено: учебные +4, тест −4 (подпись
@@ -117,10 +120,55 @@ def read_texts(res, gray, engine=None, second=None):
     return res
 
 
+def closed_ring(gray, box):
+    """Замкнутая окружность по рамке: чернила на большинстве лучей из центра. Дуга круга транзистора,
+    изгиб провода и горб катушки — обломки, мотором они не бывают."""
+    x0, y0, x1, y1 = (int(v) for v in box)
+    w, h = x1 - x0, y1 - y0
+    if w < 10 or h < 10 or max(w, h) > 1.35 * min(w, h):
+        return False
+    crop = gray[max(0, y0 - 1):y1 + 2, max(0, x0 - 1):x1 + 2]
+    if crop.size == 0:
+        return False
+    _, ink = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    cy, cx, r = crop.shape[0] / 2, crop.shape[1] / 2, min(crop.shape) / 2
+    hits = 0
+    for a in np.linspace(0, 2 * np.pi, 36, endpoint=False):
+        rr = np.linspace(0.7, 1.0, 8) * r
+        ys = np.clip((cy + rr * np.sin(a)).astype(int), 0, crop.shape[0] - 1)
+        xs = np.clip((cx + rr * np.cos(a)).astype(int), 0, crop.shape[1] - 1)
+        hits += bool(ink[ys, xs].any())
+    return hits >= 0.8 * 36
+
+
+def reads_as_text(gray, box, engine):
+    """Читается ли рамка символа как слово: две и больше букв или цифр, из них хотя бы одна
+    буква, не похожая на штрих (конденсатор сеть читает как «11» или «I1»)."""
+    w, h = box[2] - box[0], box[3] - box[1]
+    txt, conf = engine.word(gray, box, h > 1.6 * w)
+    t = re.sub(r"[^0-9A-Za-zА-Яа-я]", "", txt)
+    return conf >= TEXT_SURE and len(t) >= 2 and bool(re.search(r"[A-HJ-Za-hj-zА-Яа-я]", t))
+
+
+def drop_false_symbols(res, gray, engine):
+    """Обломки и надписи, принятые за детали, — в s["junk"]: в netlist они не идут."""
+    motors = [s for s in res["symbols"] if s["kind"] == "MOTOR"]
+    for s in res["symbols"]:
+        if s["kind"] == "MOTOR":
+            # настоящий мотор провода режут на несколько кусков рядом; обломок дуги — одиночный
+            pieces = any(o is not s and analyzer.boxes_near(s["box"], o["box"], 0.6 * max(s["box"][2] - s["box"][0], s["box"][3] - s["box"][1]))
+                         for o in motors)
+            if not pieces and not closed_ring(gray, s["box"]):
+                s["junk"] = True
+        elif s["kind"] in TEXT_LIKE and reads_as_text(gray, s["box"], engine):
+            s["junk"] = True
+
+
 def read_inside(res, gray, engine=None):
     """Номинал внутри корпуса (резистор-прямоугольник с «270» внутри): читаем внутренность
     рамки, отрезав её края. Для символов-прямоугольников без найденного номинала рядом."""
     engine = engine or ocrmod.OCR()
+    drop_false_symbols(res, gray, engine)
     sw = max(1, int(round(res.get("stroke", 1.5))))
     for s in res["symbols"]:
         if s["kind"] not in ("R", "U", "?"):
@@ -185,7 +233,7 @@ def merge_sections(comps):
 
 def build(res, title="Автоматический разбор (без ИИ)", cell=None):
     """res — результат analyzer.analyze_gray/analyze с прочитанными надписями. Возвращает netlist."""
-    syms = {s["id"]: s for s in res["symbols"] if s["kind"] not in NOT_PARTS}
+    syms = {s["id"]: s for s in res["symbols"] if s["kind"] not in NOT_PARTS and not s.get("junk")}
     texts = res["texts"]
     stroke = res.get("stroke", 2)
 
