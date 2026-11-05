@@ -47,6 +47,8 @@ NOT_PARTS = {"GND", "PORT"}
 GENERIC = {"U", "X", None}         # «прямоугольник» и неопознанное — тип берём из буквы обозначения
 # что рисуют прямоугольником с двумя выводами: у такого корпуса верим букве обозначения, а не форме
 REF_WINS_UNSURE = True             # …но если сами модели формы разошлись — букве верим
+NET_JUNK, NET_TYPE = 0.7, 2.0       # сеть символов: снимает мусор; правка типа выключена (выше 1): снижала F1
+_SYMNET = {}
 TEXT_SURE = 0.9                     # уверенность сети, с которой символ считаем надписью
 TEXT_LIKE = {"C", "TERM", "PORT", "?", "X"}   # что чаще всего выходит из букв
 NEAR_X, NEAR_Y = 1.0, 1.2           # «вплотную к обозначению»: в высотах надписи
@@ -150,8 +152,34 @@ def reads_as_text(gray, box, engine):
     return conf >= TEXT_SURE and len(t) >= 2 and bool(re.search(r"[A-HJ-Za-hj-zА-Яа-я]", t))
 
 
+def symnet_review(res, gray):
+    """Сеть с окружением символа: уверенный мусор снимает, при уверенности поправляет тип."""
+    import symclass
+    if not symclass.NET.exists():
+        return
+    net = _SYMNET.get("n") or _SYMNET.setdefault("n", symclass.SymNet())
+    pins = {}
+    for n in res["nets"]:
+        for p in n["pins"]:
+            pins[p["symbol"]] = pins.get(p["symbol"], 0) + 1
+    st = max(res.get("stroke", 2), 0.5)
+    for s in res["symbols"]:
+        if s.get("rule"):
+            continue
+        b = s["box"]
+        w, h = b[2] - b[0] + 1, b[3] - b[1] + 1
+        p = net.predict(symclass.net_crop(gray, b), np.array([min(pins.get(s["id"], 0), 8) / 4, math.log(w / h), math.log(max(w, h) / st) / 3], np.float32))
+        k = int(p.argmax())
+        s["net_kind"], s["net_conf"] = net.classes[k], round(float(p[k]), 3)
+        if p[0] >= NET_JUNK and s["kind"] not in ("GND", "PORT"):
+            s["junk"] = True
+        elif net.classes[k] != "OTHER" and p[k] >= NET_TYPE and net.classes[k] != s["kind"] and not s.get("rect"):
+            s["kind_net_from"], s["kind"] = s["kind"], net.classes[k]
+
+
 def drop_false_symbols(res, gray, engine):
     """Обломки и надписи, принятые за детали, — в s["junk"]: в netlist они не идут."""
+    symnet_review(res, gray)
     motors = [s for s in res["symbols"] if s["kind"] == "MOTOR"]
     for s in res["symbols"]:
         if s["kind"] == "MOTOR":

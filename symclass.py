@@ -231,3 +231,57 @@ if __name__ == "__main__":
         net, meta = train()
         save_model(net, meta)
         print("классов", len(meta["classes"]), "надёжных", len(meta["trusted"]))
+
+
+NET = LEARNED / "sym_net.npz"                      # сеть с окружением символа (обучена вне сканера)
+NS = 64
+
+
+def net_crop(g, box):
+    """Символ с окружением: квадрат в 1,8 размера и рамка вторым каналом."""
+    x0, y0, x1, y1 = [float(v) for v in box]
+    side = int(max(x1 - x0, y1 - y0) * 1.8 + 8)
+    cx, cy = int((x0 + x1) / 2), int((y0 + y1) / 2)
+    big = cv2.copyMakeBorder(g, side, side, side, side, cv2.BORDER_CONSTANT, value=255)
+    c = big[cy + side - side // 2:cy + side - side // 2 + side, cx + side - side // 2:cx + side - side // 2 + side]
+    k = NS / side
+    c = cv2.resize(c, (NS, NS), interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_CUBIC)
+    m = np.zeros((NS, NS), np.float32)
+    m[max(0, int((y0 - cy) * k + NS / 2)):int((y1 - cy) * k + NS / 2) + 1, max(0, int((x0 - cx) * k + NS / 2)):int((x1 - cx) * k + NS / 2) + 1] = 1
+    return np.stack([(255 - c.astype(np.float32)) / 255, m])
+
+
+class SymNet:
+    """Прогон на numpy. Возвращает класс и вероятности по вырезу и числам о символе."""
+
+    def __init__(self):
+        d = np.load(NET, allow_pickle=False)
+        self.classes = [str(c) for c in d["classes"]]
+        self.fc = (d["fc1w"], d["fc1b"], d["fc2w"], d["fc2b"])
+        self.layers = []
+        for i in range(int(d["n"])):
+            kind = str(d[f"k{i}"])
+            if kind == "conv":
+                self.layers.append((kind, d[f"w{i}"]))
+            elif kind == "norm":
+                self.layers.append((kind, [d[f"{a}{i}"].reshape(-1, 1, 1) for a in ("mean", "var", "gamma", "beta")]))
+            else:
+                self.layers.append((kind, None))
+
+    def predict(self, x, table):
+        import ocr
+        for kind, a in self.layers:
+            if kind == "conv":
+                x = ocr._conv(x, a, (1, 1))
+            elif kind == "norm":
+                x = (x - a[0]) / np.sqrt(a[1] + 1e-5) * a[2] + a[3]
+            elif kind == "relu":
+                x = np.maximum(x, 0)
+            else:
+                c, h, w = x.shape
+                x = x.reshape(c, h // 2, 2, w // 2, 2).max(axis=(2, 4))
+        z = np.concatenate([x.mean(axis=(1, 2)), table])
+        w1, b1, w2, b2 = self.fc
+        z = w2 @ np.maximum(w1 @ z + b1, 0) + b2
+        p = np.exp(z - z.max())
+        return p / p.sum()
