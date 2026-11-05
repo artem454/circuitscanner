@@ -44,6 +44,10 @@ DEFAULTS = {
     "dot_min": 2.4,         # мин. диаметр точки
     "dot_max": 8.0,         # макс. диаметр точки
     "rect_fill": 0.03,      # макс. заполнение внутри корпуса (доля)
+    "rect_big": 0.7,        # самый большой корпус, доля листа
+    "rect_thick": 1,        # рамку вырезать на всю толщину
+    "rings": 1,             # круглые корпуса не пропускают провода насквозь
+    "rect_stubs": 6,        # столько выводов нужно большому корпусу
     "rect_cont": 2,         # сколько продолжений сторон за угол = петля проводов (шт.)
     "plate_thick": 1.8,     # толще — обкладка/полоса, а не провод
     "stroke_len": 2.5,      # штрих символа короче stroke_len·min_len
@@ -458,7 +462,7 @@ def hatched_bodies(ink, bits, holes, sw, W, H, P):
     for i in range(1, n):
         x, y, w, h, area = st[i]
         lo, hi = min(w, h), max(w, h)
-        if lo < P.get("hatch_min", 3) * sw or lo > 9 * sw or hi < 1.5 * lo or hi > 8 * lo:
+        if lo < P.get("hatch_min", 3) * sw or lo > P.get("hatch_max", 20) * sw or hi < 1.5 * lo or hi > 8 * lo:
             continue                                     # не похоже на корпус резистора
         if area < 0.85 * w * h:
             continue                                     # не прямоугольник
@@ -483,6 +487,83 @@ def hatched_bodies(ink, bits, holes, sw, W, H, P):
     return out
 
 
+def ic_body(inner, w, h, sw, P):
+    """Большой корпус микросхемы: внутри крупные надписи и номера выводов, но нет длинных линий.
+    Петля из проводов с деталями внутри этим не проходит: там есть протяжённые отрезки."""
+    fill = inner.mean() / 255
+    if min(w, h) < P.get("ic_side", 20) * sw:
+        if min(w, h) < 6 * sw or fill > P.get("hatch_fill", 0.3):      # рамка резистора со штриховкой
+            return False
+    elif fill > P.get("ic_fill", 0.08):
+        return False
+    n = max(int(0.45 * min(w, h)), 8)
+    for k in ((n, 1), (1, n)):
+        if cv2.morphologyEx(inner, cv2.MORPH_OPEN, np.ones(k[::-1], np.uint8)).any():
+            return False
+    return True
+
+
+def ring_bodies(ink, sw, P):
+    """Круглые корпуса транзисторов и светодиодов: [(x, y, r)]. Сквозь такой корпус идёт прямая линия
+    стока-истока или вывода; если считать её проводом, деталь закорочена."""
+    rmin, rmax = max(P.get("ring_min", 5) * sw, 10), max(P.get("ring_max", 30) * sw, 40)
+    blur = cv2.GaussianBlur(ink, (0, 0), max(1.0, sw / 2))
+    found = cv2.HoughCircles(blur, cv2.HOUGH_GRADIENT, dp=1.2, minDist=2 * rmin, param1=120, param2=P.get("ring_vote", 28),
+                             minRadius=int(rmin), maxRadius=int(rmax))
+    if found is None:
+        return []
+    H, W = ink.shape
+    out = []
+    t = np.linspace(0, 2 * np.pi, 72, endpoint=False)
+    for x, y, r in found[0]:
+        hit = 0
+        for a in t:
+            rr = np.array([r - sw, r, r + sw])
+            xs = np.clip((x + rr * np.cos(a)).astype(int), 0, W - 1)
+            ys = np.clip((y + rr * np.sin(a)).astype(int), 0, H - 1)
+            hit += bool(ink[ys, xs].any())
+        if hit >= P.get("ring_cover", 0.85) * len(t):
+            out.append((int(x), int(y), int(r)))
+    return out
+
+
+def stubs_around(ink, box, sw):
+    """Сколько проводов выходит из рамки: отдельные участки чернил на обводе чуть снаружи неё."""
+    H, W = ink.shape
+    x0, y0, x1, y1 = (int(v) for v in box)
+    m = 2 * sw + 2
+    n = 0
+    for line in (ink[max(0, y0 - m), max(0, x0):min(W, x1)], ink[min(H - 1, y1 + m), max(0, x0):min(W, x1)],
+                 ink[max(0, y0):min(H, y1), max(0, x0 - m)], ink[max(0, y0):min(H, y1), min(W - 1, x1 + m)]):
+        b = (line > 0).astype(np.int8)
+        n += int(((b[1:] == 1) & (b[:-1] == 0)).sum())
+    return n
+
+
+def thick_outline(ink, box, sw):
+    """Рамка корпуса бывает жирнее проводов: расширить её до внешнего края, иначе остаток рамки
+    считается проводом вокруг детали и закорачивает её выводы."""
+    H, W = ink.shape
+    x0, y0, x1, y1 = (int(v) for v in box)
+    lim = 5 * sw
+
+    def grow(side):
+        for t in range(1, lim):
+            if side == 0:
+                line = ink[y0:y1, max(0, x0 - t)]
+            elif side == 1:
+                line = ink[y0:y1, min(W - 1, x1 + t)]
+            elif side == 2:
+                line = ink[max(0, y0 - t), x0:x1]
+            else:
+                line = ink[min(H - 1, y1 + t), x0:x1]
+            if not line.size or (line > 0).mean() < 0.6:
+                return t - 1
+        return lim
+
+    return [x0 - grow(0), y0 - grow(2), x1 + grow(1), y1 + grow(3)]
+
+
 def find_rects(ink, sw, W, H, P):
     """Пустые прямоугольные «дырки» = корпуса резисторов и микросхем."""
     cnts, hier = cv2.findContours(ink, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
@@ -493,16 +574,20 @@ def find_rects(ink, sw, W, H, P):
         if hier[0][i][3] < 0:
             continue
         x, y, w, h = cv2.boundingRect(c)
-        if max(w, h) <= 12 * sw:
+        if max(w, h) <= P.get("hatch_bit", 20) * sw:
             bits.append(c)                               # мелкая дырка — может быть ячейкой штриховки
-        if w < 3 * sw or h < 3 * sw or max(w, h) > 0.3 * max(W, H):
+        if w < 3 * sw or h < 3 * sw or max(w, h) > P.get("rect_big", 0.7) * max(W, H):
             continue
         if cv2.contourArea(c) < 0.85 * w * h:
             continue
         # внутри корпуса пусто (надписи уже убраны)
         inner = ink[y + 2 * sw:y + h - 2 * sw, x + 2 * sw:x + w - 2 * sw]
         if inner.size and inner.mean() / 255 > P["rect_fill"] and not only_small_marks(inner, sw, P):
-            continue
+            b = [x - sw, y - sw, x + w + sw, y + h + sw]
+            big = min(w, h) >= P.get("ic_side", 20) * sw
+            if not ic_body(inner, w, h, sw, P) or edge_continuations(ink, b, [b], sw, int(max(P["min_len"] * sw, 12))) \
+                    or (big and stubs_around(ink, b, sw) < P.get("rect_stubs", 6)):
+                continue
         holes.append([x - sw, y - sw, x + w + sw, y + h + sw])
     if P.get("hatched", 1):
         holes += hatched_bodies(ink, bits, holes, sw, W, H, P)
@@ -524,6 +609,10 @@ def find_rects(ink, sw, W, H, P):
         box = [min(b[0] for b in g), min(b[1] for b in g), max(b[2] for b in g), max(b[3] for b in g)]
         w, h = box[2] - box[0], box[3] - box[1]
         small = min(w, h) <= 9 * sw and max(w, h) >= 1.7 * min(w, h)
+        if P.get("rect_thick", 1):
+            box = thick_outline(ink, box, sw)
+        if max(w, h) > 0.3 * max(W, H) and stubs_around(ink, box, sw) < P.get("rect_stubs", 6):
+            continue                                     # большая петля из проводов, а не корпус
         rects.append({"box": [int(v) for v in box], "kind": "R" if len(g) == 1 and small else "U",
                       "cells": len(g)})
     return rects
@@ -1170,6 +1259,11 @@ def analyze_gray(gray0, P=None, ocr=False, progress=None, enhanced=None):
         x0, y0, x1, y1 = r["box"]
         cv2.rectangle(rect_mask, (x0 - 1, y0 - 1), (x1 + 1, y1 + 1), 255, -1)
     lines_src = cv2.subtract(work, rect_mask)
+    if P.get("rings", 1):
+        ring_mask = np.zeros_like(work)
+        for x, y, r in ring_bodies(work, sw, P):
+            cv2.circle(ring_mask, (x, y), int(P.get("ring_cut", 0.75) * r), 255, -1)
+        lines_src = cv2.subtract(lines_src, ring_mask)
 
     step("провода")
     hmask = cv2.morphologyEx(lines_src, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (min_len, 1)))
